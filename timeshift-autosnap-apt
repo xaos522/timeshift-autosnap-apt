@@ -137,15 +137,34 @@ echo "==> Creating Timeshift snapshot..."
 if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would create snapshot: $DESCRIPTION"
 else
-    timeshift --create --comments "$DESCRIPTION"
-    status=$?
-    [[ $status -ne 0 ]] && {
-        echo "[ERROR] timeshift --create failed..." >&2
-        echo "  with return code $status." >&2
-        echo "  perhaps timeshift is active?" >&2
-        echo "  if so, wait for timeshift to stop and retry the software update." >&2
+    typeset -i attempt=1
+    typeset -i max_attempts=3
+    typeset -i wait_seconds=2
+
+    while (( attempt <= max_attempts )); do
+
+        timeshift --create --comments "$DESCRIPTION"
+
+        status=$?
+
+        if [[ $status -eq 0 ]]; then
+            break # Success! Exit the retry loop.
+        fi
+
+        echo "[WARNING] Timeshift is busy or locked (Attempt $attempt of $max_attempts)." >&2
+        if (( attempt < max_attempts )); then
+            echo "          Retrying in $wait_seconds seconds..." >&2
+        fi
+
+        sleep $wait_seconds
+
+        (( attempt++ ))
+    done
+
+    if [[ $status -ne 0 ]]; then
+        echo "[ERROR] timeshift --create failed after $max_attempts attempts." >&2
         exit 1
-    }
+    fi
 fi
 
 # Capturing the status of 'timeshift --list' is tricky
