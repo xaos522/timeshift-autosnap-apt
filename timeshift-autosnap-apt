@@ -1,76 +1,302 @@
 #!/bin/bash
 #original author: gobonja
 #adapted for apt by Willi Mutschler (wmutschl)
+#Major refactoring by Jean De Schacht (xaos522) with a little help from Gemini
 
-[ $(findmnt / -no fstype) == "overlay" ] && { echo "==> skipping timeshift-autosnap because system is booted in Live CD mode..."; exit 0; }
+# log functions
 
-[[ -v SKIP_AUTOSNAP ]] && { echo "==> skipping timeshift-autosnap due SKIP_AUTOSNAP environment variable being set."; exit 0; }
-
-readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
-readonly SNAPSHOTS_TO_DELETE=$(mktemp -u --tmpdir ${0##*/}.XXXXXXXX)
-
-readonly SNAPSHOT_NAME_DATE_PATTERN="[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_[0-9]\{2\}-[0-9]\{2\}-[0-9]\{2\}"
-
-get_property() {
-    if [ ! -f $CONF_FILE ]; then
-        echo "$CONF_FILE not found! Using $1=$3" >&2;
-        param_value=$3
-    else
-        param_value=`sed '/^\#/d' $CONF_FILE | grep $1 | tail -n 1 |\
-        cut -d "=" -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'`
-
-        if ([ "$2" == "boolean" ] && [ "$param_value" != true ] && [ "$param_value" != false ]) || \
-           ([ "$2" == "integer" ] && [[ ! "$param_value" =~ ^[-+]?([1-9][[:digit:]]*|1)$ ]]) || \
-           ([ "$2" == "string" ] && [ "$param_value" == "" ]) ; then
-            echo "Wrong paramater in $CONF_FILE. Using $1=$3" >&2
-            param_value=$3
-        fi
-    fi
-
-    echo $param_value
+# log to syslog and to terminal when DEBUG is true
+log_syslog() {
+    logger -- "timeshift-autosnap-apt: $@"
+    log_debug "$@"
 }
 
-if $(get_property "skipAutosnap" "boolean" "false") ; then
-    echo "==> skipping timeshift-autosnap-apt due skipAutosnap in $CONF_FILE set to TRUE." >&2; exit 0;
-fi
+# log to terminal when DEBUG is true
+log_debug () {
+    $DEBUG && echo "$@"
+}
 
-if $(get_property "snapshotBoot" "boolean" "true") ; then
-    echo "Rsyncing /boot into the filesystem before the call to timeshift." >&2;
-    mkdir -p /boot.backup
-    cmd="rsync -au --exclude 'efi' --delete /boot/ /boot.backup/"
-    eval $cmd
-fi
+# Info gathering:
+# Walk up the process stack for the current process.
+# Find out where the DPkg:Pre-Invoke hook is invoked, if at all.
+# Log results in syslog.
 
-if $(get_property "snapshotEFI" "boolean" "true") ; then
-    echo "Rsyncing /boot/efi into the filesystem before the call to timeshift." >&2;
-    mkdir -p /boot.backup
-    mkdir -p /boot.backup/efi
-    cmd="rsync -au --delete /boot/efi/ /boot.backup/efi/"
-    eval $cmd
-fi
+PATTERN="^[[:space:]]*([0-9]+)[[:space:]]+(.*)$"
+LEVEL=0
+PARENT_PID="$$"
 
-readonly SNAPSHOT_DESCRIPTION=$(get_property "snapshotDescription" "string" "{timeshift-autosnap-apt} {created before upgrade}")
+while true ; do
+    PS_OUT="$(ps -o ppid= -o args= -p $PARENT_PID)"
+    # !!! WATCH OUT "Off-by_One logic" !!!
+    # ps_out now has the PID of the next higher level
+    # but the ARGUMENTS from the current level.
+    # The ORDER of the following commands is IMPORTANT.
+    [[ "$PS_OUT" =~ $PATTERN ]] || break
+    ARGS=${BASH_REMATCH[2]}
+    # output THIS levels PARENT_PID and ARGS
+    log_syslog "#$LEVEL $PARENT_PID $ARGS"
+    [[ "$PARENT_PID" == "1" ]] && break
+    # set PARENT_PID for the next level
+    PARENT_PID=${BASH_REMATCH[1]}
+    (( LEVEL++ ))
+done
 
-timeshift --create --comments "$SNAPSHOT_DESCRIPTION" || { echo "Unable to run timeshift-autosnap-apt! Please close Timeshift and try again. Script will now exit..." >&2; exit 1; }
+unset PATTERN LEVEL PARENT_PID ARGS PS_OUT
 
-if $(get_property "deleteSnapshots" "boolean" "true") ; then
-    timeshift --list > $SNAPSHOTS_TO_DELETE
-    sed -ni "/$SNAPSHOT_DESCRIPTION/p" $SNAPSHOTS_TO_DELETE
-    sed -ni "s/.*\($SNAPSHOT_NAME_DATE_PATTERN\).*/\1/p" $SNAPSHOTS_TO_DELETE
+# 1. Constants & Initialization
+readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
+readonly DATE_PATTERN="[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}"
+readonly SCRIPT_TAG="{timeshift-autosnap-apt}" # Forced namespace for safety
+typeset -A CONFIG  # Associative array for O(1) lookups
+DRY_RUN=false
+DEBUG=false
 
-    count=$(($(sed -n '$=' $SNAPSHOTS_TO_DELETE)-$(get_property "maxSnapshots" "integer" "3")))
+# 2. Argument Parsing
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -d|--dry-run) DRY_RUN=true; shift ;;
+        -v|--verbose) DEBUG=true; shift ;;
+        -h|--help)
+            log_debug "Usage: $0 [options]"
+            log_debug "Options:"
+            log_debug "  -d, --dry-run    Show what would happen without making changes"
+            log_debug "  -v, --verbose    Show loaded configuration and debug info"
+            log_debug "  -h, --help       Show this help message"
+            exit 0 ;;
+        *)
+            log_debug "Ignore unrecognized option $1."
+            shift ;;
+    esac
+done
 
-    if [ "$count" -gt 0 ] ; then
-        sed -i $(($count))q $SNAPSHOTS_TO_DELETE
-        
-        for snapshot in $(cat $SNAPSHOTS_TO_DELETE); do
-            timeshift --delete --snapshot $snapshot
+# 3. One-Pass parser
+# Helper function: remove leading and trailing whitespace from variable value
+shopt -s extglob
+trim() {
+    # argument $1 is a variable name
+    typeset -n nref=$1
+    nref="${nref##+([[:space:]])}" # Trim leading whitespace
+    nref="${nref%%+([[:space:]])}" # Trim trailing whitespace
+}
+
+# Parse configuration file and store results in an associative array
+load_config() {
+    if [[ -f "$CONF_FILE" ]]; then
+        typeset -a CONF_LINES
+        typeset  LINE KEY VAL
+        # Non-greedy pattern to match a line in the conf file.
+        # When a line has multiple = signs we only only want
+        # the text before the first one as first capture group.
+        VALID_LINE_PATTERN='^([^=]+)=(.*)$'
+        mapfile -t CONF_LINES < "$CONF_FILE"
+        for LINE in "${CONF_LINES[@]}"; do
+            # Skip empty lines and comments
+            [[ -z "$LINE" || "$LINE" =~ ^[[:space:]]*# ]] && continue
+            # Split the line on '=' character, non-gready.
+            if [[ "$LINE" =~ $VALID_LINE_PATTERN ]]; then {
+                KEY="${BASH_REMATCH[1]}"
+                VAL="${BASH_REMATCH[2]}"
+                trim KEY
+                trim VAL
+                CONFIG["$KEY"]="$VAL"
+            }
+            else {
+                # No match - no '=' sign in LINE.
+                log_debug "Ignore line in conf file ${CONF_FILE}:"
+                log_debug "$LINE"
+           }
+            fi
         done
+    else {
+        log_syslog "$CONF_FILE is not a regular file. Using defaults."
+    }
     fi
-fi;
+}
 
-if $(get_property "updateGrub" "boolean" "true") && [[ -d /etc/default/grub-btrfs ]]; then
-    grub-mkconfig -o /boot/grub/grub.cfg
-fi;
+get_property() {
+    typeset KEY="$1" TYPE="$2" DEFAULT="$3"
+    typeset VAL="${CONFIG[$KEY]}"
+
+    [[ -z "$VAL" ]] && VAL="$DEFAULT"
+
+    case "$TYPE" in
+        boolean) [[ "$VAL" =~ ^(true|false)$ ]] || VAL="$DEFAULT" ;;
+        integer) [[ "$VAL" =~ ^[0-9]+$ ]] || VAL="$DEFAULT" ;;
+        string)  [[ -n "$VAL" ]] || VAL="$DEFAULT" ;;
+    esac
+    echo "$VAL"
+}
+
+load_config
+
+# 4. Debug Output
+if $DEBUG; then
+    log_debug "--- DEBUG: Loaded Configuration ---"
+    for K in "${!CONFIG[@]}"; do log_debug "  $K = ${CONFIG[$K]}"; done
+    log_debug "-----------------------------------"
+fi
+unset K
+
+$DRY_RUN && log_debug "--- DRY RUN MODE ACTIVE ---"
+
+# 5. Load Properties into Variables
+SKIP_SNAP=$(get_property "skipAutosnap" "boolean" "false")
+SNAP_BOOT=$(get_property "snapshotBoot" "boolean" "false")
+SNAP_EFI=$(get_property "snapshotEFI" "boolean" "false")
+DELETE_OLD=$(get_property "deleteSnapshots" "boolean" "true")
+MAX_SNAPS=$(get_property "maxSnapshots" "integer" "3")
+UPDATE_GRUB=$(get_property "updateGrub" "boolean" "false")
+USER_NOTE=$(get_property "snapshotDescription" "string" "created before software update.")
+
+unset CONFIG
+
+# The "Namespace Lock": DESCRIPTION always starts with SCRIPT_TAG
+DESCRIPTION="$SCRIPT_TAG $USER_NOTE"
+
+# 6. Safety Checks
+[[ $(findmnt / -no fstype) == "overlay" ]] && { log_debug "skipping: Live CD mode."; exit 0; }
+[[ -v SKIP_AUTOSNAP ]] && { log_debug "skipping: SKIP_AUTOSNAP env detected."; exit 0; }
+[[ "$SKIP_SNAP" == "true" ]] && { log_debug "skipping: skipAutosnap enabled in config."; exit 0; }
+
+# Helper functions
+
+run_sync() {
+    typeset SRC="$1" DEST="$2"
+    log_syslog "Syncing $SRC to $DEST..."
+    if $DRY_RUN; then
+        log_debug "[DRY RUN] Would rsync $SRC to $DEST"
+    else
+        mkdir -p "$DEST" && rsync -au --delete "$SRC" "$DEST"
+    fi
+}
+
+run_timeshift() {
+    typeset -i attempt=1
+    typeset -i max_attempts=3
+    typeset -i wait_seconds=2
+    typeset ts_subcommand
+    typeset ts_return_code=
+
+    ts_subcommand=$1
+
+    log_syslog "run 'timeshift $@'"
+
+    #  Do not retry the timeshift --delete command when it fails.
+    #+ Just log an error message and continue.
+    #+ Next run of the script will retry the delete.
+    if [[ $ts_subcommand == --delete ]]; then
+        timeshift "$@"
+        ts_return_code=$?
+    else
+        # run timeshift command with retries
+        while (( attempt <= max_attempts )); do
+
+            case $ts_subcommand in
+
+                --create )
+                    timeshift "$@"
+                    ts_return_code=$?
+                    ;;
+
+                --list )
+                    # To capture the exit status of the timeshift --list command,
+                    # use a standard pipe instead of process substitution.
+                    # We grep specifically for the tag to select auto snapshots.
+                    timeshift "$@" | grep -F "$SCRIPT_TAG" | mapfile -t AUTO_SNAPS
+                    ts_return_code=${PIPESTATUS[0]}
+                    ;;
+
+                * )
+                    log_syslog "timeshift $ts_subcommand is not supported"
+                    exit 1
+            esac
+
+            if [[ $ts_return_code -eq 0 ]]; then
+                break # Success! Exit the retry loop.
+            else
+                # timeshift command failed
+                log_syslog "timeshift $ts_subcommand returned $ts_return_code (attempt $attempt of $max_attempts)"
+                if (( attempt < max_attempts )); then
+                    sleep $wait_seconds
+                fi
+
+                (( attempt++ ))
+
+            fi
+        done # end of retries
+    fi
+
+    log_syslog "'timeshift $ts_subcommand' returned ${ts_return_code}"
+
+    return $ts_return_code
+
+} # end of run_timeshift
+
+# 7. Execution Logic
+
+[[ "$SNAP_BOOT" == "true" ]] && run_sync "/boot/" "/boot.backup/"
+[[ "$SNAP_EFI" == "true" ]] && run_sync "/boot/efi/" "/boot.backup/efi/"
+
+if $DRY_RUN; then
+    log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
+else
+    run_timeshift --create --comments "$DESCRIPTION"
+    [[ $? -ne 0 ]] && exit $return_code
+fi
+
+#  We can not run 'timeshift --list' in a subshell because we
+#+ want to capture its status in PIPESTATUS
+#+ To run timeshift --list | grep ... | mapfile without using
+#+ subshells, we must set
+set +m
+shopt -s lastpipe
+
+# 8. Delete oldest autosnap snapshots
+if [[ "$DELETE_OLD" == "true" ]]; then
+    typeset -a  AUTO_SNAPS
+
+    run_timeshift --list
+
+    if [[ $? -ne 0 ]]; then
+        log_syslog "skip automatic deletion of oldest snapshots"
+    else
+        # Success logic
+        NUM_TO_DELETE=$(( ${#AUTO_SNAPS[@]} - MAX_SNAPS ))
+
+        if (( NUM_TO_DELETE > 0 )); then
+            log_debug "Found ${#AUTO_SNAPS[@]} autosnaps. Delete oldest $NUM_TO_DELETE."
+            for (( i=0; i<NUM_TO_DELETE; i++ )); do
+                if [[ "${AUTO_SNAPS[i]}" =~ $DATE_PATTERN ]]; then
+                    TIMESTAMP="${BASH_REMATCH[0]}"
+                    if $DRY_RUN; then
+                        log_debug "[DRY RUN] Would delete: $TIMESTAMP"
+                    else
+                        run_timeshift --delete --snapshot "$TIMESTAMP"
+                    fi
+                fi
+            done
+        else
+            log_debug "Snapshot count within limit. No deletions needed."
+        fi
+    fi
+fi
+
+if [[ "$UPDATE_GRUB" == "true" ]] && command -v grub-mkconfig >/dev/null; then
+    if [[ -d /etc/default/grub-btrfs ]] || [[ -f /usr/share/doc/grub-btrfs/README.md ]]; then
+        log_syslog "Update grub..."
+        $DRY_RUN || {
+            grub-mkconfig -o /boot/grub/grub.cfg
+            status=$?
+            [[ $status -eq 0 ]] || {
+                log_syslog "Update grub failed."
+                exit 1
+            }
+        }
+    fi
+fi
+
+log_syslog "Finished successfully."
+
+exit 0
 
 exit 0
