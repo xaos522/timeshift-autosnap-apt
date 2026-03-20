@@ -24,24 +24,48 @@ log_debug () {
 PATTERN="^[[:space:]]*([0-9]+)[[:space:]]+(.*)$"
 LEVEL=0
 PARENT_PID="$$"
+TRIGGER_CMD=""
 
 while true ; do
     PS_OUT="$(ps -o ppid= -o args= -p $PARENT_PID)"
     # !!! WATCH OUT "Off-by_One logic" !!!
-    # ps_out now has the PID of the next higher level
+    # PS_OUT now has the PID of the next higher level
     # but the ARGUMENTS from the current level.
     # The ORDER of the following commands is IMPORTANT.
     [[ "$PS_OUT" =~ $PATTERN ]] || break
+    NEXT_LEVEL_PPID=${BASH_REMATCH[1]}
     ARGS=${BASH_REMATCH[2]}
+
+    # --- NEW: Capture the first 'apt' or 'aptd' we find in the stack ---
+    if [[ -z "$TRIGGER_CMD" ]]; then
+        # Matches: apt/apt-get followed by the action (install/remove/etc) and everything after
+        if [[ "$ARGS" =~ ^(sudo[[:space:]]+)?(apt|apt-get)[[:space:]]+(install|remove|purge|dist-upgrade|full-upgrade)[[:space:]]+(.*) ]]; then
+            BINARY="${BASH_REMATCH[2]}"
+            ACTION="${BASH_REMATCH[3]}"
+            PARAMS="${BASH_REMATCH[4]}"
+
+            # Clean the parameters of flags like -y or --quiet
+            CLEAN_PARAMS=$(clean_apt_args "$PARAMS")
+            TRIGGER_CMD="$BINARY $ACTION: $CLEAN_PARAMS"
+
+        elif [[ "$ARGS" =~ /usr/sbin/aptd ]]; then
+            TRIGGER_CMD="Aptdaemon (GUI Update)"
+        fi
+    fi
+
+    # --- End New Section ---
+
     # output THIS levels PARENT_PID and ARGS
     log_syslog "#$LEVEL $PARENT_PID $ARGS"
     [[ "$PARENT_PID" == "1" ]] && break
     # set PARENT_PID for the next level
-    PARENT_PID=${BASH_REMATCH[1]}
+    PARENT_PID=$NEXT_LEVEL_PPID
     (( LEVEL++ ))
 done
 
-unset PATTERN LEVEL PARENT_PID ARGS PS_OUT
+log_syslog "TRIGGER_CMD =  $TRIGGER_CMD"
+
+unset PATTERN LEVEL PARENT_PID NEXT_LEVEL_PPID ARGS PS_OUT
 
 # 1. Constants & Initialization
 readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
@@ -54,17 +78,17 @@ DEBUG=false
 # 2. Argument Parsing
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        -d|--dry-run) DRY_RUN=true; shift ;;
-        -v|--verbose) DEBUG=true; shift ;;
+        -n|--dry-run) DRY_RUN=true; shift ;;
+        -d|--debug) DEBUG=true; shift ;;
         -h|--help)
-            log_debug "Usage: $0 [options]"
-            log_debug "Options:"
-            log_debug "  -d, --dry-run    Show what would happen without making changes"
-            log_debug "  -v, --verbose    Show loaded configuration and debug info"
-            log_debug "  -h, --help       Show this help message"
+            echo "Usage: $0 [options]"
+            echo "Options:"
+            echo "  -d, --dry-run    Show what would happen without making changes"
+            echo "  -v, --verbose    Show loaded configuration and debug info"
+            echo "  -h, --help       Show this help message"
             exit 0 ;;
         *)
-            log_debug "Ignore unrecognized option $1."
+            echo "Ignore unrecognized option $1."
             shift ;;
     esac
 done
@@ -146,12 +170,27 @@ SNAP_EFI=$(get_property "snapshotEFI" "boolean" "false")
 DELETE_OLD=$(get_property "deleteSnapshots" "boolean" "true")
 MAX_SNAPS=$(get_property "maxSnapshots" "integer" "3")
 UPDATE_GRUB=$(get_property "updateGrub" "boolean" "false")
-USER_NOTE=$(get_property "snapshotDescription" "string" "created before software update.")
+
+USER_NOTE=$(get_property "snapshotDescription" "string" "before software update.")
+# Construct the dynamic snapshot comment
+if [[ -n "$TRIGGER_CMD" ]]; then
+    # Trim potential extra spaces from the dynamic command
+    trim TRIGGER_CMD
+    FINAL_NOTE="$TRIGGER_CMD"
+else
+    FINAL_NOTE="$USER_NOTE"
+fi
+# The "Namespace Lock"
+DESCRIPTION="$SCRIPT_TAG $FINAL_NOTE"
+
+# Skip creating a new snapshot when the last snapshot is less than
+# the configured seconds old
+SNAPSHOT_THRESHOLD=$(get_property "snapshotThreshold" "integer" "300")
+# timeshift retries configuration:
+TS_MAX_ATTEMPTS=$(get_property "timeshiftMaxAttempts" "integer" "3")
+TS_WAIT_SECONDS=$(get_property "timeshiftWaitSeconds" "integer" "2")
 
 unset CONFIG
-
-# The "Namespace Lock": DESCRIPTION always starts with SCRIPT_TAG
-DESCRIPTION="$SCRIPT_TAG $USER_NOTE"
 
 # 6. Safety Checks
 [[ $(findmnt / -no fstype) == "overlay" ]] && { log_debug "skipping: Live CD mode."; exit 0; }
@@ -172,112 +211,184 @@ run_sync() {
 
 run_timeshift() {
     typeset -i attempt=1
-    typeset -i max_attempts=3
-    typeset -i wait_seconds=2
     typeset ts_subcommand
     typeset ts_return_code=
+    typeset -g -a ALL_SNAPSHOTS
 
     ts_subcommand=$1
 
     log_syslog "run 'timeshift $@'"
 
-    #  Do not retry the timeshift --delete command when it fails.
-    #+ Just log an error message and continue.
-    #+ Next run of the script will retry the delete.
-    if [[ $ts_subcommand == --delete ]]; then
-        timeshift "$@"
-        ts_return_code=$?
-    else
-        # run timeshift command with retries
-        while (( attempt <= max_attempts )); do
+    # run timeshift command with retries
+    while (( attempt <= TS_MAX_ATTEMPTS )); do
 
-            case $ts_subcommand in
+        case $ts_subcommand in
 
-                --create )
-                    timeshift "$@"
-                    ts_return_code=$?
-                    ;;
+            --create )
+                timeshift "$@"
+                ts_return_code=$?
+                ;;
 
-                --list )
-                    # To capture the exit status of the timeshift --list command,
-                    # use a standard pipe instead of process substitution.
-                    # We grep specifically for the tag to select auto snapshots.
-                    timeshift "$@" | grep -F "$SCRIPT_TAG" | mapfile -t AUTO_SNAPS
-                    ts_return_code=${PIPESTATUS[0]}
-                    ;;
+            --list )
+                #  To capture the exit status of the timeshift --list command,
+                #+ use a standard pipe instead of process substitution.
+                #+ We want to capture the timeshift --list status in PIPESTATUS.
+                #+ However, to run timeshift --list mapfile without
+                #+ using a subshell, we must set
+                set +m
+                shopt -s lastpipe
 
-                * )
-                    log_syslog "timeshift $ts_subcommand is not supported"
-                    exit 1
-            esac
+                timeshift "$@" 2>&1 | mapfile -t ALL_SNAPSHOTS
+                ts_return_code=${PIPESTATUS[0]}
+                ;;
 
-            if [[ $ts_return_code -eq 0 ]]; then
-                break # Success! Exit the retry loop.
-            else
-                # timeshift command failed
-                log_syslog "timeshift $ts_subcommand returned $ts_return_code (attempt $attempt of $max_attempts)"
-                if (( attempt < max_attempts )); then
-                    sleep $wait_seconds
-                fi
+            --delete )
+                timeshift "$@"
+                ts_return_code=$?
+                #  Do not retry the timeshift --delete command when it fails.
+                #+ Just log an error message and continue.
+                #+ Next run of the script will retry the delete.
+                (( attempt = $(( attempt + TS_MAX_ATTEMPTS )) ))
+                ;;
 
-                (( attempt++ ))
+            * )
+                log_syslog "timeshift $ts_subcommand is not supported"
+                exit 1
+        esac
 
+        if [[ $ts_return_code -eq 0 ]]; then
+            break # Success! Exit the retry loop.
+        else
+            # timeshift command failed
+            log_syslog "timeshift $ts_subcommand returned $ts_return_code (attempt $attempt of $TS_MAX_ATTEMPTS)"
+            if (( attempt < TS_MAX_ATTEMPTS )); then
+                sleep $TS_WAIT_SECONDS
             fi
-        done # end of retries
-    fi
 
-    log_syslog "'timeshift $ts_subcommand' returned ${ts_return_code}"
+            (( attempt++ ))
+
+        fi
+    done # end of retries
+
+    log_syslog "timeshift $ts_subcommand returned ${ts_return_code}"
 
     return $ts_return_code
 
 } # end of run_timeshift
+
+# automatic deletion of oldest auto snapshots
+auto_delete_snapshots() {
+    log_debug "Found ${#AUTO_SNAPSHOTS[@]} autosnaps. Delete oldest $NUM_TO_DELETE."
+    typeset -i i
+    typeset SNAPSHOT
+
+    for (( i=0; i<NUM_TO_DELETE; i++ )); do
+        SNAPSHOT="${AUTO_SNAPSHOTS[i]}"
+        if $DRY_RUN; then
+            log_debug "[DRY RUN] Would delete: $SNAPSHOT"
+        else
+            run_timeshift --delete --snapshot "$SNAPSHOT"
+        fi
+    done
+}
+
+get_snapshot_age() {
+    typeset SNAPSHOT="$1"
+    typeset TIMESTAMP
+    typeset -i SNAPSHOT_EPOCH
+    typeset -i NOW_EPOCH
+    # Convert YYYY-MM-DD_HH-MM-SS to YYYY-MM-DD HH:MM:SS
+    TIMESTAMP="${SNAPSHOT/_/ }"
+    TIMESTAMP="${TIMESTAMP:0:10} ${TIMESTAMP:11:2}:${TIMESTAMP:14:2}:${TIMESTAMP:17:2}"
+    typeset -i SNAPSHOT_EPOCH=$(date -u -d "$TIMESTAMP" +%s)
+    typeset -i NOW_EPOCH=$(date -u +%s)
+    echo $(( NOW_EPOCH - SNAPSHOT_EPOCH ))
+}
+
+# strip any word from input variable starting with a dash
+clean_apt_args() {
+    typeset -a raw_args=($1)
+    typeset -a clean_args=()
+    for arg in "${raw_args[@]}"; do
+        # If argument doesn't start with '-', keep it
+        [[ "$arg" != -* ]] && clean_args+=("$arg")
+    done
+    echo "${clean_args[*]}"
+}
+
+# End of helper functions
 
 # 7. Execution Logic
 
 [[ "$SNAP_BOOT" == "true" ]] && run_sync "/boot/" "/boot.backup/"
 [[ "$SNAP_EFI" == "true" ]] && run_sync "/boot/efi/" "/boot.backup/efi/"
 
-if $DRY_RUN; then
-    log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
-else
-    run_timeshift --create --comments "$DESCRIPTION"
-    [[ $? -ne 0 ]] && exit $return_code
+# Determine if we should skip based on SNAPSHOT_THRESHOLD
+
+run_timeshift --list || exit $?
+
+#  Filter ALL_SNAPSHOTS for auto snapshots using SCRIPT_TAG to distinguish
+#+ normal timeshift snapshots from auto snapshots
+#+ and extract snapshot timestamp
+#+ store the result in AUTO_SNAPSHOTS
+typeset -g -a AUTO_SNAPSHOTS=()
+
+log_debug "All snapshots: ${#ALL_SNAPSHOTS[@]}"
+
+# Escape all regular expression special characters in SCRIPT_TAG
+# This escapes: . \ [ ] ( ) * + ? ^ $ | { }
+ESCAPED_SCRIPT_TAG_PATTERN=$(echo "$SCRIPT_TAG" | sed 's/[.[\*^$()+?{|}]/\\&/g')
+for snapshot in "${ALL_SNAPSHOTS[@]}"; do
+    if [[ "$snapshot" =~ $ESCAPED_SCRIPT_TAG_PATTERN ]] &&
+           [[ "$snapshot" =~ $DATE_PATTERN ]]; then
+        AUTO_SNAPSHOTS+=("${BASH_REMATCH[0]}")
+    fi
+done
+
+unset ALL_SNAPSHOTS
+
+if $DEBUG; then
+    log_debug "AUTO_SNAPSHOTS: ${#AUTO_SNAPSHOTS[@]}"
+    for snapshot in "${AUTO_SNAPSHOTS[@]}"; do
+        log_debug "$snapshot"
+    done
 fi
 
-#  We can not run 'timeshift --list' in a subshell because we
-#+ want to capture its status in PIPESTATUS
-#+ To run timeshift --list | grep ... | mapfile without using
-#+ subshells, we must set
-set +m
-shopt -s lastpipe
+if (( ${#AUTO_SNAPSHOTS[@]} > 0 )); then
+    LAST_SNAP="${AUTO_SNAPSHOTS[-1]}"
+    if [[ -n "$LAST_SNAP" ]]; then
+        AGE=$(get_snapshot_age "$LAST_SNAP")
+        log_syslog "Age of last snapshot: $AGE seconds"
+        if (( AGE < SNAPSHOT_THRESHOLD )); then
+            log_syslog "SKIPPING: last snapshot is only $AGE seconds old (Threshold: $SNAPSHOT_THRESHOLD)."
+            exit 0
+        fi
+    fi
+fi
+
+log_debug "DESCRIPTION = $DESCRIPTION"
+
+if $DRY_RUN; then
+    log_debug "?"
+    log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
+else
+    run_timeshift --create --comments "$DESCRIPTION" || exit 1
+fi
 
 # 8. Delete oldest autosnap snapshots
 if [[ "$DELETE_OLD" == "true" ]]; then
-    typeset -a  AUTO_SNAPS
+    # Do NOT count in the new snapshot that was created in this run.
+    # We do not want to run the 'costly' timeshift --list command
+    # again to create an up-to-date AUTO_SNAPSHOTS array.
+    # Any auto snapshot that is candidate for removal  and is not removed
+    # in this run, will be removed in the next run.
+    NUM_TO_DELETE=$(( ${#AUTO_SNAPSHOTS[@]} - MAX_SNAPS ))
+    if (( NUM_TO_DELETE > 0 )); then
 
-    run_timeshift --list
+        auto_delete_snapshots
 
-    if [[ $? -ne 0 ]]; then
-        log_syslog "skip automatic deletion of oldest snapshots"
     else
-        # Success logic
-        NUM_TO_DELETE=$(( ${#AUTO_SNAPS[@]} - MAX_SNAPS ))
-
-        if (( NUM_TO_DELETE > 0 )); then
-            log_debug "Found ${#AUTO_SNAPS[@]} autosnaps. Delete oldest $NUM_TO_DELETE."
-            for (( i=0; i<NUM_TO_DELETE; i++ )); do
-                if [[ "${AUTO_SNAPS[i]}" =~ $DATE_PATTERN ]]; then
-                    TIMESTAMP="${BASH_REMATCH[0]}"
-                    if $DRY_RUN; then
-                        log_debug "[DRY RUN] Would delete: $TIMESTAMP"
-                    else
-                        run_timeshift --delete --snapshot "$TIMESTAMP"
-                    fi
-                fi
-            done
-        else
-            log_debug "Snapshot count within limit. No deletions needed."
-        fi
+        log_syslog "Snapshot count (${#AUTO_SNAPSHOTS[@]}) within limit ($MAX_SNAPS). No deletions needed."
     fi
 fi
 
@@ -296,7 +407,5 @@ if [[ "$UPDATE_GRUB" == "true" ]] && command -v grub-mkconfig >/dev/null; then
 fi
 
 log_syslog "Finished successfully."
-
-exit 0
 
 exit 0
