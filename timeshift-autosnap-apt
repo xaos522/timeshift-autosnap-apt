@@ -3,24 +3,32 @@
 #adapted for apt by Willi Mutschler (wmutschl)
 #Major refactoring by Jean De Schacht (xaos522) with a little help from Gemini
 
-# log functions
+# 1. Fundamental Log Functions
+log_debug () {
+    $DEBUG && echo "$@"
+}
 
-# log to syslog and to terminal when DEBUG is true
 log_syslog() {
     logger -- "timeshift-autosnap-apt: $@"
     log_debug "$@"
 }
 
-# log to terminal when DEBUG is true
-log_debug () {
-    $DEBUG && echo "$@"
+# 2. Argument Cleaner (Must be defined before the Walker calls it!)
+#    strip any word from the functions argument starting with a dash
+clean_apt_args() {
+    typeset -a raw_args=($1)
+    typeset -a clean_args=()
+    for arg in "${raw_args[@]}"; do
+        # If argument doesn't start with '-', keep it
+        [[ "$arg" != -* ]] && clean_args+=("$arg")
+    done
+    echo "${clean_args[*]}"
 }
 
-# Info gathering:
-# Walk up the process stack for the current process.
-# Find out where the DPkg:Pre-Invoke hook is invoked, if at all.
-# Log results in syslog.
-
+# 3. Process Walker
+#    Walk up the process stack for the current process.
+#    Find out where the DPkg:Pre-Invoke hook is invoked, if at all.
+#    Log results in syslog.
 PATTERN="^[[:space:]]*([0-9]+)[[:space:]]+(.*)$"
 LEVEL=0
 PARENT_PID="$$"
@@ -46,7 +54,7 @@ while true ; do
 
             # Clean the parameters of flags like -y or --quiet
             CLEAN_PARAMS=$(clean_apt_args "$PARAMS")
-            TRIGGER_CMD="$BINARY $ACTION: $CLEAN_PARAMS"
+            TRIGGER_CMD="$BINARY $ACTION $CLEAN_PARAMS"
 
         elif [[ "$ARGS" =~ /usr/sbin/aptd ]]; then
             TRIGGER_CMD="Aptdaemon (GUI Update)"
@@ -66,8 +74,9 @@ done
 log_syslog "TRIGGER_CMD =  $TRIGGER_CMD"
 
 unset PATTERN LEVEL PARENT_PID NEXT_LEVEL_PPID ARGS PS_OUT
+unset BINARY ACTION PARAMS CLEAN_PARAMS
 
-# 1. Constants & Initialization
+# 4. Constants & Initialization
 readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
 readonly DATE_PATTERN="[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}"
 readonly SCRIPT_TAG="{timeshift-autosnap-apt}" # Forced namespace for safety
@@ -75,7 +84,7 @@ typeset -A CONFIG  # Associative array for O(1) lookups
 DRY_RUN=false
 DEBUG=false
 
-# 2. Argument Parsing
+# 5. Argument Parsing
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -n|--dry-run) DRY_RUN=true; shift ;;
@@ -93,7 +102,7 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-# 3. One-Pass parser
+# 6. One-Pass parser
 # Helper function: remove leading and trailing whitespace from variable value
 shopt -s extglob
 trim() {
@@ -153,7 +162,7 @@ get_property() {
 
 load_config
 
-# 4. Debug Output
+# 7. Debug Output
 if $DEBUG; then
     log_debug "--- DEBUG: Loaded Configuration ---"
     for K in "${!CONFIG[@]}"; do log_debug "  $K = ${CONFIG[$K]}"; done
@@ -163,7 +172,7 @@ unset K
 
 $DRY_RUN && log_debug "--- DRY RUN MODE ACTIVE ---"
 
-# 5. Load Properties into Variables
+# 8. Load Properties into Variables
 SKIP_SNAP=$(get_property "skipAutosnap" "boolean" "false")
 SNAP_BOOT=$(get_property "snapshotBoot" "boolean" "false")
 SNAP_EFI=$(get_property "snapshotEFI" "boolean" "false")
@@ -174,7 +183,7 @@ UPDATE_GRUB=$(get_property "updateGrub" "boolean" "false")
 USER_NOTE=$(get_property "snapshotDescription" "string" "before software update.")
 # Construct the dynamic snapshot comment
 if [[ -n "$TRIGGER_CMD" ]]; then
-    # Trim potential extra spaces from the dynamic command
+    # Trim potential extra spaces from the command that triggered us
     trim TRIGGER_CMD
     FINAL_NOTE="$TRIGGER_CMD"
 else
@@ -192,7 +201,7 @@ TS_WAIT_SECONDS=$(get_property "timeshiftWaitSeconds" "integer" "2")
 
 unset CONFIG
 
-# 6. Safety Checks
+# 9. Safety Checks
 [[ $(findmnt / -no fstype) == "overlay" ]] && { log_debug "skipping: Live CD mode."; exit 0; }
 [[ -v SKIP_AUTOSNAP ]] && { log_debug "skipping: SKIP_AUTOSNAP env detected."; exit 0; }
 [[ "$SKIP_SNAP" == "true" ]] && { log_debug "skipping: skipAutosnap enabled in config."; exit 0; }
@@ -217,7 +226,7 @@ run_timeshift() {
 
     ts_subcommand=$1
 
-    log_syslog "run 'timeshift $@'"
+    log_syslog "timeshift $@"
 
     # run timeshift command with retries
     while (( attempt <= TS_MAX_ATTEMPTS )); do
@@ -304,21 +313,9 @@ get_snapshot_age() {
     typeset -i NOW_EPOCH=$(date -u +%s)
     echo $(( NOW_EPOCH - SNAPSHOT_EPOCH ))
 }
-
-# strip any word from input variable starting with a dash
-clean_apt_args() {
-    typeset -a raw_args=($1)
-    typeset -a clean_args=()
-    for arg in "${raw_args[@]}"; do
-        # If argument doesn't start with '-', keep it
-        [[ "$arg" != -* ]] && clean_args+=("$arg")
-    done
-    echo "${clean_args[*]}"
-}
-
 # End of helper functions
 
-# 7. Execution Logic
+# 10. Execution Logic
 
 [[ "$SNAP_BOOT" == "true" ]] && run_sync "/boot/" "/boot.backup/"
 [[ "$SNAP_EFI" == "true" ]] && run_sync "/boot/efi/" "/boot.backup/efi/"
@@ -375,7 +372,7 @@ else
     run_timeshift --create --comments "$DESCRIPTION" || exit 1
 fi
 
-# 8. Delete oldest autosnap snapshots
+# 11. Delete oldest autosnap snapshots
 if [[ "$DELETE_OLD" == "true" ]]; then
     # Do NOT count in the new snapshot that was created in this run.
     # We do not want to run the 'costly' timeshift --list command
@@ -406,6 +403,6 @@ if [[ "$UPDATE_GRUB" == "true" ]] && command -v grub-mkconfig >/dev/null; then
     fi
 fi
 
-log_syslog "Finished successfully."
+log_syslog "Snapshot cycle completed successfully."
 
 exit 0
