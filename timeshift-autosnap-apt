@@ -374,28 +374,37 @@ if $DEBUG; then
     done
 fi
 
+# Do not create a new snapshot when age of last snapshot is less than SNAPSHOT_THRESHOLD seconds old
+CREATE_NEW_SNAPSHOT=true
 if (( ${#AUTO_SNAPSHOTS[@]} > 0 )); then
     LAST_SNAP="${AUTO_SNAPSHOTS[-1]}"
     if [[ -n "$LAST_SNAP" ]]; then
         AGE=$(get_snapshot_age "$LAST_SNAP")
         log_syslog "Age of last snapshot: $AGE seconds"
         if (( AGE < SNAPSHOT_THRESHOLD )); then
-            log_syslog "SKIPPING: last snapshot is only $AGE seconds old (Threshold: $SNAPSHOT_THRESHOLD)."
-            exit 0
+            log_syslog "SKIP snapshot creation: last snapshot is only $AGE seconds old (Threshold: $SNAPSHOT_THRESHOLD)."
+            CREATE_NEW_SNAPSHOT=false
+            # do not call auto_delete_snapshots again
+            DELETE_OLD=false
+            # do not run grub_mkconfig again
+            UPDATE_GRUB=false
         fi
     fi
 fi
 
 log_debug "DESCRIPTION = $DESCRIPTION"
 
-if $DRY_RUN; then
-    log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
-else
-    run_timeshift --create --comments "$DESCRIPTION" || exit 1
+if $CREATE_NEW_SNAPSHOT; then
+    if $DRY_RUN; then
+        log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
+    else
+        run_timeshift --create --comments "$DESCRIPTION" || exit 1
+    fi
 fi
 
 # 11. auto delete snapshots.
 if $DELETE_OLD; then
+    log_debug "call auto_delete_snapshots..."
     auto_delete_snapshots
 fi
 
