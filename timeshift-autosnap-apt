@@ -14,7 +14,7 @@ log_syslog() {
 }
 
 # 2. Argument Cleaner (Must be defined before the Walker calls it!)
-#    strip any word from the functions argument starting with a dash
+#    strip any word from the input starting with a dash
 clean_apt_args() {
     typeset -a raw_args=($1)
     typeset -a clean_args=()
@@ -44,7 +44,7 @@ while true ; do
     NEXT_LEVEL_PPID=${BASH_REMATCH[1]}
     ARGS=${BASH_REMATCH[2]}
 
-    # --- NEW: Capture the first 'apt' or 'aptd' we find in the stack ---
+    # --- capture the first 'apt' or 'aptd' we find in the stack ---
     if [[ -z "$TRIGGER_CMD" ]]; then
         # Matches: apt/apt-get followed by the action (install/remove/etc) and everything after
         if [[ "$ARGS" =~ ^(sudo[[:space:]]+)?(apt|apt-get)[[:space:]]+(install|remove|purge|dist-upgrade|full-upgrade)[[:space:]]+(.*) ]]; then
@@ -61,8 +61,6 @@ while true ; do
         fi
     fi
 
-    # --- End New Section ---
-
     # output THIS levels PARENT_PID and ARGS
     log_syslog "#$LEVEL $PARENT_PID $ARGS"
     [[ "$PARENT_PID" == "1" ]] && break
@@ -71,7 +69,7 @@ while true ; do
     (( LEVEL++ ))
 done
 
-log_syslog "TRIGGER_CMD =  $TRIGGER_CMD"
+log_debug "TRIGGER_CMD =  $TRIGGER_CMD"
 
 unset PATTERN LEVEL PARENT_PID NEXT_LEVEL_PPID ARGS PS_OUT
 unset BINARY ACTION PARAMS CLEAN_PARAMS
@@ -134,9 +132,9 @@ load_config() {
                 CONFIG["$KEY"]="$VAL"
             }
             else {
-                # No match - no '=' sign in LINE.
-                log_debug "Ignore line in conf file ${CONF_FILE}:"
-                log_debug "$LINE"
+                # No match - no '=' sign in  LINE.
+                log_syslog "Ignore following line in ${CONF_FILE} (does not match PATTERN):"
+                log_syslog "$LINE"
            }
             fi
         done
@@ -173,12 +171,12 @@ unset K
 $DRY_RUN && log_debug "--- DRY RUN MODE ACTIVE ---"
 
 # 8. Load Properties into Variables
-SKIP_SNAP=$(get_property "skipAutosnap" "boolean" "false")
-SNAP_BOOT=$(get_property "snapshotBoot" "boolean" "false")
-SNAP_EFI=$(get_property "snapshotEFI" "boolean" "false")
-DELETE_OLD=$(get_property "deleteSnapshots" "boolean" "true")
+SKIP_SNAP=$(get_property "skipAutosnap" "boolean" false)
+SNAP_BOOT=$(get_property "snapshotBoot" "boolean" false)
+SNAP_EFI=$(get_property "snapshotEFI" "boolean" false)
+DELETE_OLD=$(get_property "deleteSnapshots" "boolean" true)
 MAX_SNAPS=$(get_property "maxSnapshots" "integer" "3")
-UPDATE_GRUB=$(get_property "updateGrub" "boolean" "false")
+UPDATE_GRUB=$(get_property "updateGrub" "boolean" false)
 
 USER_NOTE=$(get_property "snapshotDescription" "string" "before software update.")
 # Construct the dynamic snapshot comment
@@ -195,16 +193,15 @@ DESCRIPTION="$SCRIPT_TAG $FINAL_NOTE"
 # Skip creating a new snapshot when the last snapshot is less than
 # the configured seconds old
 SNAPSHOT_THRESHOLD=$(get_property "snapshotThreshold" "integer" "300")
+
 # timeshift retries configuration:
 TS_MAX_ATTEMPTS=$(get_property "timeshiftMaxAttempts" "integer" "3")
 TS_WAIT_SECONDS=$(get_property "timeshiftWaitSeconds" "integer" "2")
 
-unset CONFIG
-
 # 9. Safety Checks
 [[ $(findmnt / -no fstype) == "overlay" ]] && { log_debug "skipping: Live CD mode."; exit 0; }
 [[ -v SKIP_AUTOSNAP ]] && { log_debug "skipping: SKIP_AUTOSNAP env detected."; exit 0; }
-[[ "$SKIP_SNAP" == "true" ]] && { log_debug "skipping: skipAutosnap enabled in config."; exit 0; }
+$SKIP_SNAP && { log_syslog "skipping: skipAutosnap enabled in config."; exit 0; }
 
 # Helper functions
 
@@ -285,22 +282,6 @@ run_timeshift() {
 
 } # end of run_timeshift
 
-# automatic deletion of oldest auto snapshots
-auto_delete_snapshots() {
-    log_debug "Found ${#AUTO_SNAPSHOTS[@]} autosnaps. Delete oldest $NUM_TO_DELETE."
-    typeset -i i
-    typeset SNAPSHOT
-
-    for (( i=0; i<NUM_TO_DELETE; i++ )); do
-        SNAPSHOT="${AUTO_SNAPSHOTS[i]}"
-        if $DRY_RUN; then
-            log_debug "[DRY RUN] Would delete: $SNAPSHOT"
-        else
-            run_timeshift --delete --snapshot "$SNAPSHOT"
-        fi
-    done
-}
-
 get_snapshot_age() {
     typeset SNAPSHOT="$1"
     typeset TIMESTAMP
@@ -313,12 +294,54 @@ get_snapshot_age() {
     typeset -i NOW_EPOCH=$(date -u +%s)
     echo $(( NOW_EPOCH - SNAPSHOT_EPOCH ))
 }
+
+#  Automatic deletion of auto snapshots.
+#+ Using hybrid deletion policy:
+#+ Age based but with a Minimum Count safety value.
+auto_delete_snapshots() {
+    MIN_KEEP=$(get_property "minKeepSnapshots" "integer" 3)
+    RETENTION_PERIOD=$(get_property "retentionPeriod" "integer" 604800) # 7 days
+
+    # Calculate how many snapshots we can actually consider for deletion
+    # (Total snapshots - Minimum we must keep)
+    typeset -i total_count=${#AUTO_SNAPSHOTS[@]}
+    typeset -i deletable_limit=$(( total_count - MIN_KEEP ))
+
+    if (( deletable_limit > 0 )); then
+        log_syslog "check for snapshots older than $RETENTION_PERIOD seconds (Safety Valve: keeping $MIN_KEEP)..."
+
+        # We iterate through the oldest snapshots first
+        for (( i=0; i<deletable_limit; i++ )); do
+            SNAPSHOT="${AUTO_SNAPSHOTS[i]}"
+            AGE=$(get_snapshot_age "$SNAPSHOT")
+
+            if (( AGE > RETENTION_PERIOD )); then
+                if $DRY_RUN; then
+                    log_debug "[DRY RUN] Would delete expired snapshot: $SNAPSHOT (Age: $AGE seconds)"
+                else
+                    log_syslog "delete expired snapshot: $SNAPSHOT (Age: $AGE seconds)."
+                    run_timeshift --delete --snapshot "$SNAPSHOT"
+                fi
+            else
+                # Since AUTO_SNAPSHOTS is chronological, once we hit a snapshot
+                # younger than the limit, all subsequent ones are also younger.
+                log_debug "Snapshot $SNAPSHOT: age is within retention period ($AGE/$RETENTION_PERIOD)."
+                log_debug "Break out of the age check loop."
+                break
+            fi
+        done
+        log_syslog "check over"
+    else
+        log_syslog "snapshot count ($total_count) is at or below Safety Valve ($MIN_KEEP). Skip age-based deletion."
+    fi
+}
+
 # End of helper functions
 
 # 10. Execution Logic
 
-[[ "$SNAP_BOOT" == "true" ]] && run_sync "/boot/" "/boot.backup/"
-[[ "$SNAP_EFI" == "true" ]] && run_sync "/boot/efi/" "/boot.backup/efi/"
+$SNAP_BOOT && run_sync "/boot/" "/boot.backup/"
+$SNAP_EFI && run_sync "/boot/efi/" "/boot.backup/efi/"
 
 # Determine if we should skip based on SNAPSHOT_THRESHOLD
 
@@ -366,37 +389,25 @@ fi
 log_debug "DESCRIPTION = $DESCRIPTION"
 
 if $DRY_RUN; then
-    log_debug "?"
     log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
 else
     run_timeshift --create --comments "$DESCRIPTION" || exit 1
 fi
 
-# 11. Delete oldest autosnap snapshots
-if [[ "$DELETE_OLD" == "true" ]]; then
-    # Do NOT count in the new snapshot that was created in this run.
-    # We do not want to run the 'costly' timeshift --list command
-    # again to create an up-to-date AUTO_SNAPSHOTS array.
-    # Any auto snapshot that is candidate for removal  and is not removed
-    # in this run, will be removed in the next run.
-    NUM_TO_DELETE=$(( ${#AUTO_SNAPSHOTS[@]} - MAX_SNAPS ))
-    if (( NUM_TO_DELETE > 0 )); then
-
-        auto_delete_snapshots
-
-    else
-        log_syslog "Snapshot count (${#AUTO_SNAPSHOTS[@]}) within limit ($MAX_SNAPS). No deletions needed."
-    fi
+# 11. auto delete snapshots.
+if $DELETE_OLD; then
+    auto_delete_snapshots
 fi
 
-if [[ "$UPDATE_GRUB" == "true" ]] && command -v grub-mkconfig >/dev/null; then
+# 12. update grub.
+if $UPDATE_GRUB && command -v grub-mkconfig >/dev/null; then
     if [[ -d /etc/default/grub-btrfs ]] || [[ -f /usr/share/doc/grub-btrfs/README.md ]]; then
         log_syslog "Update grub..."
         $DRY_RUN || {
             grub-mkconfig -o /boot/grub/grub.cfg
             status=$?
             [[ $status -eq 0 ]] || {
-                log_syslog "Update grub failed."
+                log_syslog "grub-mkconfig failed with status $status."
                 exit 1
             }
         }
