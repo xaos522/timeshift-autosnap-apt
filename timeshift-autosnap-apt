@@ -178,7 +178,7 @@ DELETE_OLD=$(get_property "deleteSnapshots" "boolean" true)
 MAX_SNAPS=$(get_property "maxSnapshots" "integer" "3")
 UPDATE_GRUB=$(get_property "updateGrub" "boolean" false)
 
-USER_NOTE=$(get_property "snapshotDescription" "string" "before software update.")
+USER_NOTE=$(get_property "snapshotDescription" "string" "* unknown caller *")
 # Construct the dynamic snapshot comment
 if [[ -n "$TRIGGER_CMD" ]]; then
     # Trim potential extra spaces from the command that triggered us
