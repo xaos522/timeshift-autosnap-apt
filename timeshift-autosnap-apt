@@ -3,7 +3,7 @@
 #adapted for apt by Willi Mutschler (wmutschl)
 #Major refactoring by Jean De Schacht (xaos522) with a little help from Gemini
 
-# 1. Fundamental Log Functions
+# Log Functions
 log_debug () {
     $DEBUG && echo "$@"
 }
@@ -13,105 +13,79 @@ log_syslog() {
     log_debug "$@"
 }
 
-# 2. Argument Cleaner (Must be defined before the Walker calls it!)
-#    strip any word from the input starting with a dash
+# ---------- Helper functions ----------
+
+# Argument Cleaner
+# strip any word starting with a dash
 clean_apt_args() {
     typeset -a raw_args=($1)
     typeset -a clean_args=()
     for arg in "${raw_args[@]}"; do
-        # If argument doesn't start with '-', keep it
+        # if argument doesn't start with '-', keep it
         [[ "$arg" != -* ]] && clean_args+=("$arg")
     done
     echo "${clean_args[*]}"
 }
 
-# 3. Process Walker
-#    Walk up the process stack for the current process.
-#    Find out where the DPkg:Pre-Invoke hook is invoked, if at all.
-#    Log results in syslog.
-PATTERN="^[[:space:]]*([0-9]+)[[:space:]]+(.*)$"
-LEVEL=0
-PARENT_PID="$$"
-TRIGGER_CMD=""
+# Process Tree Walker
+# Walk up the process tree for the current process.
+# Find out where the DPkg:Pre-Invoke hook is invoked.
+# Log results in syslog.
+walk_up_the_process_tree() {
+    typeset PATTERN="^[[:space:]]*([0-9]+)[[:space:]]+(.*)$"
+    typeset -i LEVEL=0
+    typeset PARENT_PID="$$"
+    typeset -g TRIGGER_CMD=""
+    typeset PS_OUT NEXT_LEVEL_PPID ARGS BINARY ACTION PARAMS CLEAN_PARAMS
 
-while true ; do
-    PS_OUT="$(ps -o ppid= -o args= -p $PARENT_PID)"
-    # !!! WATCH OUT "Off-by_One logic" !!!
-    # PS_OUT now has the PID of the next higher level
-    # but the ARGUMENTS from the current level.
-    # The ORDER of the following commands is IMPORTANT.
-    [[ "$PS_OUT" =~ $PATTERN ]] || break
-    NEXT_LEVEL_PPID=${BASH_REMATCH[1]}
-    ARGS=${BASH_REMATCH[2]}
+    while true ; do
+        typeset PS_OUT="$(ps -o ppid= -o args= -p $PARENT_PID)"
+        # !!! WATCH OUT "Off-by_One logic" !!!
+        # PS_OUT now has the PID of the next higher level
+        # but the ARGUMENTS from the current level.
+        # The ORDER of the following commands is IMPORTANT.
+        [[ "$PS_OUT" =~ $PATTERN ]] || break
+        typeset NEXT_LEVEL_PPID=${BASH_REMATCH[1]}
+        typeset ARGS=${BASH_REMATCH[2]}
 
-    # --- capture the first 'apt' or 'aptd' we find in the stack ---
-    if [[ -z "$TRIGGER_CMD" ]]; then
-        # Matches: apt/apt-get followed by the action (install/remove/etc) and everything after
-        if [[ "$ARGS" =~ ^(sudo[[:space:]]+)?(apt|apt-get)[[:space:]]+(install|remove|purge|dist-upgrade|full-upgrade)[[:space:]]+(.*) ]]; then
-            BINARY="${BASH_REMATCH[2]}"
-            ACTION="${BASH_REMATCH[3]}"
-            PARAMS="${BASH_REMATCH[4]}"
+        # --- capture the first 'apt' or 'aptd' we find in the stack ---
+        if [[ -z "$TRIGGER_CMD" ]]; then
+            # Matches: apt/apt-get followed by the action (install/remove/etc) and everything after
+            if [[ "$ARGS" =~ ^(sudo[[:space:]]+)?(apt|apt-get)[[:space:]]+(install|remove|purge|dist-upgrade|full-upgrade)[[:space:]]+(.*) ]]; then
+                typeset BINARY="${BASH_REMATCH[2]}"
+                typeset ACTION="${BASH_REMATCH[3]}"
+                typeset PARAMS="${BASH_REMATCH[4]}"
 
-            # Clean the parameters of flags like -y or --quiet
-            CLEAN_PARAMS=$(clean_apt_args "$PARAMS")
-            TRIGGER_CMD="$BINARY $ACTION $CLEAN_PARAMS"
+                # Clean the parameters of flags like -y or --quiet
+                typeset CLEAN_PARAMS=$(clean_apt_args "$PARAMS")
+                TRIGGER_CMD="$BINARY $ACTION $CLEAN_PARAMS"
 
-        elif [[ "$ARGS" =~ /usr/sbin/aptd ]]; then
-            TRIGGER_CMD="Aptdaemon (GUI Update)"
+            elif [[ "$ARGS" =~ /usr/sbin/aptd ]]; then
+                TRIGGER_CMD="Aptdaemon (GUI Update)"
+            fi
         fi
-    fi
 
-    # output THIS levels PARENT_PID and ARGS
-    log_syslog "#$LEVEL $PARENT_PID $ARGS"
-    [[ "$PARENT_PID" == "1" ]] && break
-    # set PARENT_PID for the next level
-    PARENT_PID=$NEXT_LEVEL_PPID
-    (( LEVEL++ ))
-done
+        # output THIS levels PARENT_PID and ARGS
+        log_syslog "#$LEVEL $PARENT_PID $ARGS"
+        [[ "$PARENT_PID" == "1" ]] && break
+        # set PARENT_PID for the next level
+        PARENT_PID=$NEXT_LEVEL_PPID
+        (( LEVEL++ ))
+    done
+}
 
-log_debug "TRIGGER_CMD =  $TRIGGER_CMD"
-
-unset PATTERN LEVEL PARENT_PID NEXT_LEVEL_PPID ARGS PS_OUT
-unset BINARY ACTION PARAMS CLEAN_PARAMS
-
-# 4. Constants & Initialization
-readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
-readonly DATE_PATTERN="[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}"
-readonly SCRIPT_TAG="{timeshift-autosnap-apt}" # Forced namespace for safety
-typeset -A CONFIG  # Associative array for O(1) lookups
-DRY_RUN=false
-DEBUG=false
-
-# 5. Argument Parsing
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        -n|--dry-run) DRY_RUN=true; shift ;;
-        -d|--debug) DEBUG=true; shift ;;
-        -h|--help)
-            echo "Usage: $0 [options]"
-            echo "Options:"
-            echo "  -d, --dry-run    Show what would happen without making changes"
-            echo "  -v, --verbose    Show loaded configuration and debug info"
-            echo "  -h, --help       Show this help message"
-            exit 0 ;;
-        *)
-            echo "Ignore unrecognized option $1."
-            shift ;;
-    esac
-done
-
-# 6. One-Pass parser
-# Helper function: remove leading and trailing whitespace from variable value
-shopt -s extglob
+# trim variable
 trim() {
-    # argument $1 is a variable name
+    # using nameref
     typeset -n nref=$1
     nref="${nref##+([[:space:]])}" # Trim leading whitespace
     nref="${nref%%+([[:space:]])}" # Trim trailing whitespace
 }
 
+# One-Pass parser
 # Parse configuration file and store results in an associative array
 load_config() {
+    typeset -g -A CONFIG
     if [[ -f "$CONF_FILE" ]]; then
         typeset -a CONF_LINES
         typeset  LINE KEY VAL
@@ -129,6 +103,7 @@ load_config() {
                 VAL="${BASH_REMATCH[2]}"
                 trim KEY
                 trim VAL
+                [[ -z "$VAL" ]] && VAL=""
                 CONFIG["$KEY"]="$VAL"
             }
             else {
@@ -158,60 +133,27 @@ get_property() {
     echo "$VAL"
 }
 
-load_config
-
-# 7. Debug Output
-if $DEBUG; then
-    log_debug "--- DEBUG: Loaded Configuration ---"
-    for K in "${!CONFIG[@]}"; do log_debug "  $K = ${CONFIG[$K]}"; done
-    log_debug "-----------------------------------"
-fi
-unset K
-
-$DRY_RUN && log_debug "--- DRY RUN MODE ACTIVE ---"
-
-# 8. Load Properties into Variables
-SKIP_SNAP=$(get_property "skipAutosnap" "boolean" false)
-SNAP_BOOT=$(get_property "snapshotBoot" "boolean" false)
-SNAP_EFI=$(get_property "snapshotEFI" "boolean" false)
-DELETE_OLD=$(get_property "deleteSnapshots" "boolean" true)
-MAX_SNAPS=$(get_property "maxSnapshots" "integer" "3")
-UPDATE_GRUB=$(get_property "updateGrub" "boolean" false)
-
-USER_NOTE=$(get_property "snapshotDescription" "string" "* unknown caller *")
-# Construct the dynamic snapshot comment
-if [[ -n "$TRIGGER_CMD" ]]; then
-    # Trim potential extra spaces from the command that triggered us
-    trim TRIGGER_CMD
-    FINAL_NOTE="$TRIGGER_CMD"
-else
-    FINAL_NOTE="$USER_NOTE"
-fi
-# The "Namespace Lock"
-DESCRIPTION="$SCRIPT_TAG $FINAL_NOTE"
-
-# Skip creating a new snapshot when the last snapshot is less than
-# the configured seconds old
-SNAPSHOT_THRESHOLD=$(get_property "snapshotThreshold" "integer" "300")
-
-# timeshift retries configuration:
-TS_MAX_ATTEMPTS=$(get_property "timeshiftMaxAttempts" "integer" "3")
-TS_WAIT_SECONDS=$(get_property "timeshiftWaitSeconds" "integer" "2")
-
-# 9. Safety Checks
-[[ $(findmnt / -no fstype) == "overlay" ]] && { log_debug "skipping: Live CD mode."; exit 0; }
-[[ -v SKIP_AUTOSNAP ]] && { log_debug "skipping: SKIP_AUTOSNAP env detected."; exit 0; }
-$SKIP_SNAP && { log_syslog "skipping: skipAutosnap enabled in config."; exit 0; }
-
-# Helper functions
-
 run_sync() {
     typeset SRC="$1" DEST="$2"
-    log_syslog "Syncing $SRC to $DEST..."
+    typeset -i rc
+    log_syslog "rsync -au --delete $SRC $DEST"
     if $DRY_RUN; then
-        log_debug "[DRY RUN] Would rsync $SRC to $DEST"
+        log_debug "[DRY RUN] Would rsync -au --delete $SRC $DEST"
     else
-        mkdir -p "$DEST" && rsync -au --delete "$SRC" "$DEST"
+        mkdir -p "$DEST"
+        rc=$?
+        [[ $rc -eq 0 ]] || {
+            send_desktop_notification "critical" "run_sync failed." "mkdir $DEST returned status $rc. Abort."
+            log_syslog "run_sync rc=$rc. Abort."
+            exit $rc
+        }
+        rsync -au --delete "$SRC" "$DEST"
+        rc=$?
+        [[ $rc -eq 0 ]] || {
+            send_desktop_notification "critical" "run_sync failed." "rsync -au --delete $SRC $DEST returned status $?. Abort."
+            log_syslog "run_sync rc=$rc. Abort."
+            exit $rc
+        }
     fi
 }
 
@@ -223,7 +165,7 @@ run_timeshift() {
 
     ts_subcommand=$1
 
-    log_syslog "timeshift $@"
+    # log_debug "timeshift $@"
 
     # run timeshift command with retries
     while (( attempt <= TS_MAX_ATTEMPTS )); do
@@ -266,7 +208,7 @@ run_timeshift() {
             break # Success! Exit the retry loop.
         else
             # timeshift command failed
-            log_syslog "timeshift $ts_subcommand returned $ts_return_code (attempt $attempt of $TS_MAX_ATTEMPTS)"
+            log_syslog "timeshift $ts_subcommand rc=$ts_return_code (attempt $attempt of $TS_MAX_ATTEMPTS)"
             if (( attempt < TS_MAX_ATTEMPTS )); then
                 sleep $TS_WAIT_SECONDS
             fi
@@ -276,7 +218,26 @@ run_timeshift() {
         fi
     done # end of retries
 
-    log_syslog "timeshift $ts_subcommand returned ${ts_return_code}"
+    if [[ $ts_return_code -ne 0 ]]; then
+        case $ts_subcommand in
+            --list)
+                send_desktop_notification "critical" "timeshift $ts_subcommand failed." "The timeshift $ts_subcommand command failed after $TS_MAX_ATTEMPTS tries. Maybe another instance of timeshift is active that holds the timeshift lock. Check syslog for errors. Abort."
+                log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Abort."
+                exit $ts_return_code
+                ;;
+
+            --create)
+                send_desktop_notification "critical" "timeshift $ts_subcommand failed." "The timeshift $ts_subcommand command failed after $TS_MAX_ATTEMPTS tries. Maybe another instance of timeshift active that holds the timeshift lock. Check syslog for errors."
+                log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Abort."
+                exit $ts_return_code
+                ;;
+            *)
+                log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Ignore."
+                ;;
+        esac
+    else
+        log_syslog "timeshift $ts_subcommand rc=${ts_return_code}."
+    fi
 
     return $ts_return_code
 
@@ -335,26 +296,219 @@ auto_delete_snapshots() {
         log_syslog "snapshot count ($total_count) is at or below Safety Valve ($MIN_KEEP). Skip age-based deletion."
     fi
 }
+send_desktop_notification() {
+
+    function get_active_gui_user() {
+        typeset -n nr_gui_user=$1
+        typeset -n nr_gui_user_id=$2
+        typeset whereami="find_active_gui_user_using_loginctl"
+
+        # have loginctl?
+        if ! command -v loginctl >/dev/null; then
+            log_debug "${whereami}: command loginctlx not found"
+            return 1
+        fi
+
+        typeset -a LOGINCTL_USERS
+        set +m
+        shopt -s lastpipe
+        loginctl --no-legend list-users 2>/dev/null | mapfile -t LOGINCTL_USERS
+        rc=${PIPESTATUS[0]}
+        [[ $rc -eq 0 ]] || {
+            log_debug "${whereami}: loginctl rc=$rc"
+            return $rc
+        }
+        typeset item
+        typeset pattern="^[[:space:]]*([0-9]+)[[:space:]]*([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+)[[:space:]]*$"
+        for item in "${LOGINCTL_USERS[@]}"; do
+            if [[ "$item" =~ $pattern ]]; then
+                active="${BASH_REMATCH[3]}"
+                nr_gui_user_id="${BASH_REMATCH[1]}"
+                ( [[ "$active" != active ]] || [[ "$user_id" == 0 ]] ) && continue
+                nr_gui_user="${BASH_REMATCH[2]}"
+                break
+            else
+                log_debug "${whereami}: ($item) does not match pattern"
+            fi
+        done
+    }
+
+    function get_active_gui_user_fallback() {
+        # Find the GUI user for X11 setup (usually the one logged into display :0)
+        typeset -n nr_gui_user=$1
+        typeset -n nr_gui_user_id=$2
+        typeset whereami="find_active_gui_user_using_w"
+
+        # have w?
+        if ! command -v w >/dev/null; then
+            log_debug "${whereami}: command w not found"
+            return 1
+        fi
+
+        typeset -a W
+        set +m
+        shopt -s lastpipe
+        w --no-header 2>/dev/null | mapfile -t W
+        rc=${PIPESTATUS[0]}
+        [[ $rc -eq 0 ]] || {
+            log_debug "${whereami}: command w failed rc=$rc"
+            return $rc
+        }
+        typeset item
+        typeset pattern="^[[:space:]]*([^[:space:]]+).*$"
+        for item in "${W[@]}"; do
+            if [[ "$item" =~ $pattern ]]; then
+                nr_gui_user="${BASH_REMATCH[1]}"
+                [[ "$nr_gui_user" == root ]] && continue
+                break
+            else
+                log_debug "${whereami}: ($item) does not match pattern"
+            fi
+        done
+        nr_gui_user_id=""
+        if [[ -n "$nr_gui_user" ]]; then
+            # Get the user's ID to access their DBUS session
+            nr_gui_user_id=$(id -u "$gui_user")
+        fi
+    }
+
+
+    typeset whereami="send_desktop_notification"
+    typeset urgency="$1"   # low, normal, critical
+    typeset summary="$2"
+    typeset body="$3"
+    typeset -i rc
+
+    # have notify-send?
+    if ! command -v notify-send >/dev/null; then
+        log_debug "${whereami}: command notify-send not found"
+        return 1
+    fi
+
+    typeset gui_user=""
+    typeset user_id=""
+
+    get_active_gui_user gui_user user_id
+
+    if [[ -z "${gui_user}" ]]; then
+        get_active_gui_user_fallback gui_user user_id
+    fi
+
+    # still no gui_user? give up
+    if [[ -z "${gui_user}" ]]; then
+        log_debug "${whereami}: failed to get gui_user"
+        return 1
+    fi
+
+    # Execute as the user, pointing to their specific D-Bus bus
+    # This works for both X11 and Wayland
+    sudo -u "$gui_user" \
+         DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$user_id"/bus \
+         notify-send -u "$urgency" -i "timeshift" "$summary" "$body" \
+         -t 10000
+    rc=$?
+    [[ "$rc" -eq 0 ]] || log_debug "$whereami: notify-send rc=$rc"
+    return $rc
+
+} # End of send_desktop_notification
+
+# Argument Parsing
+get_options() {
+    typeset -g DRY_RUN DEBUG
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            -n|--dry-run) DRY_RUN=true; shift ;;
+            -d|--debug) DEBUG=true; shift ;;
+            -t|--test-send-notify)
+                DEBUG=true
+                send_desktop_notification \
+                    "normal" "Desktop notification test." \
+                    "Testing if desktop notifications work on your system."
+                shift
+                exit 0 ;;
+            -h|--help)
+                echo "Usage: $0 [options]"
+                echo "Options:"
+                echo "  -d, --dry-run          Show what would happen without making changes"
+                echo "  -v, --verbose          Show loaded configuration and debug info"
+                echo "  -t, --test-send-notify Test desktop notification"
+                echo "  -h, --help       Show this help message"
+                exit 0 ;;
+            *)
+                echo "Unknown option $1"
+                shift
+                exit 1
+                ;;
+        esac
+    done
+}
 
 # End of helper functions
 
-# 10. Execution Logic
+# ---------- Main Execution Logic ----------
 
+# Constants & Initialization
+readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
+readonly DATE_PATTERN="[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}"
+readonly SCRIPT_TAG="{timeshift-autosnap-apt}" # Forced namespace for our snapshots
+
+# get options
+DRY_RUN=false
+DEBUG=false
+get_options "$@"
+$DRY_RUN && log_debug "--- DRY RUN MODE ACTIVE ---"
+
+# load configuration file
+typeset -A CONFIG
+shopt -s extglob
+
+load_config
+
+# Debug configuration options
+if $DEBUG; then
+    log_debug "--- DEBUG: Loaded Configuration ---"
+    for k in "${!CONFIG[@]}"; do log_debug "  $k = ${CONFIG[$k]}"; done
+    log_debug "-----------------------------------"
+fi
+unset k
+
+# Load Properties into Variables
+SKIP_SNAP=$(get_property "skipAutosnap" "boolean" false)
+SNAP_BOOT=$(get_property "snapshotBoot" "boolean" false)
+SNAP_EFI=$(get_property "snapshotEFI" "boolean" false)
+DELETE_OLD=$(get_property "deleteSnapshots" "boolean" true)
+MAX_SNAPS=$(get_property "maxSnapshots" "integer" "3")
+UPDATE_GRUB=$(get_property "updateGrub" "boolean" false)
+USER_NOTE=$(get_property "snapshotDescription" "string" "* unknown caller *")
+# Skip creating a new snapshot when the last snapshot is less than
+# the configured seconds old
+SNAPSHOT_THRESHOLD=$(get_property "snapshotThreshold" "integer" "300")
+# timeshift retries configuration:
+TS_MAX_ATTEMPTS=$(get_property "timeshiftMaxAttempts" "integer" "3")
+TS_WAIT_SECONDS=$(get_property "timeshiftWaitSeconds" "integer" "2")
+
+# early check for exit
+[[ $(findmnt / -no fstype) == "overlay" ]] && { log_debug "skipping: Live CD mode."; exit 0; }
+[[ -v SKIP_AUTOSNAP ]] && { log_debug "skipping: SKIP_AUTOSNAP env detected."; exit 0; }
+$SKIP_SNAP && { log_syslog "skipping: skipAutosnap enabled in config."; exit 0; }
+
+# run sync if configured
 $SNAP_BOOT && run_sync "/boot/" "/boot.backup/"
 $SNAP_EFI && run_sync "/boot/efi/" "/boot.backup/efi/"
 
 # Determine if we should skip based on SNAPSHOT_THRESHOLD
+typeset -a ALL_SNAPSHOTS
 
+# load ALL_SNAPSHOTS (holds ALL lines from the --list command)
 run_timeshift --list || exit $?
-
-#  Filter ALL_SNAPSHOTS for auto snapshots using SCRIPT_TAG to distinguish
-#+ normal timeshift snapshots from auto snapshots
-#+ and extract snapshot timestamp
-#+ store the result in AUTO_SNAPSHOTS
-typeset -g -a AUTO_SNAPSHOTS=()
 
 log_debug "All snapshots: ${#ALL_SNAPSHOTS[@]}"
 
+#  Filter ALL_SNAPSHOTS for auto snapshots using SCRIPT_TAG to distinguish
+#+ normal timeshift snapshots from auto snapshots
+#+ extract snapshot timestamp
+#+ load the result in AUTO_SNAPSHOTS
+typeset -a AUTO_SNAPSHOTS=()
 # Escape all regular expression special characters in SCRIPT_TAG
 # This escapes: . \ [ ] ( ) * + ? ^ $ | { }
 ESCAPED_SCRIPT_TAG_PATTERN=$(echo "$SCRIPT_TAG" | sed 's/[.[\*^$()+?{|}]/\\&/g')
@@ -374,7 +528,8 @@ if $DEBUG; then
     done
 fi
 
-# Do not create a new snapshot when age of last snapshot is less than SNAPSHOT_THRESHOLD seconds old
+# test snapshot threshold
+# Do not create a new snapshot when last snapshot is less than SNAPSHOT_THRESHOLD seconds old
 CREATE_NEW_SNAPSHOT=true
 if (( ${#AUTO_SNAPSHOTS[@]} > 0 )); then
     LAST_SNAP="${AUTO_SNAPSHOTS[-1]}"
@@ -392,8 +547,22 @@ if (( ${#AUTO_SNAPSHOTS[@]} > 0 )); then
     fi
 fi
 
-log_debug "DESCRIPTION = $DESCRIPTION"
+# build dynamic snapshot description
+TRIGGER_CMD=""
+walk_up_the_process_tree
+log_debug "TRIGGER_CMD =  $TRIGGER_CMD"
+if [[ -n "$TRIGGER_CMD" ]]; then
+    # trim extra whitespace
+    trim TRIGGER_CMD
+    FINAL_NOTE="$TRIGGER_CMD"
+else
+    FINAL_NOTE="$USER_NOTE"
+fi
+# The "Namespace Lock"
+DESCRIPTION="$SCRIPT_TAG $FINAL_NOTE"
+unset TRIGGER_CMD FINAL_NOTE
 
+# maybe create new snapshot
 if $CREATE_NEW_SNAPSHOT; then
     if $DRY_RUN; then
         log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
@@ -402,13 +571,13 @@ if $CREATE_NEW_SNAPSHOT; then
     fi
 fi
 
-# 11. auto delete snapshots.
+# auto delete snapshots.
 if $DELETE_OLD; then
     log_debug "call auto_delete_snapshots..."
     auto_delete_snapshots
 fi
 
-# 12. update grub.
+# update grub.
 if $UPDATE_GRUB && command -v grub-mkconfig >/dev/null; then
     if [[ -d /etc/default/grub-btrfs ]] || [[ -f /usr/share/doc/grub-btrfs/README.md ]]; then
         log_syslog "Update grub..."
@@ -417,6 +586,7 @@ if $UPDATE_GRUB && command -v grub-mkconfig >/dev/null; then
             status=$?
             [[ $status -eq 0 ]] || {
                 log_syslog "grub-mkconfig failed with status $status."
+                send_desktop_notification "critical" "Update grub failed." "Command grub_mkconfig failed. This could make your system unbootable. Check syslog for errors."
                 exit 1
             }
         }
