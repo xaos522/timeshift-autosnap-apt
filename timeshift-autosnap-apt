@@ -145,6 +145,7 @@ run_sync() {
         [[ $rc -eq 0 ]] || {
             send_desktop_notification "critical" "run_sync failed." "mkdir $DEST returned status $rc. Abort."
             log_syslog "run_sync rc=$rc. Abort."
+            trap - EXIT
             exit $rc
         }
         rsync -au --delete "$SRC" "$DEST"
@@ -152,6 +153,7 @@ run_sync() {
         [[ $rc -eq 0 ]] || {
             send_desktop_notification "critical" "run_sync failed." "rsync -au --delete $SRC $DEST returned status $?. Abort."
             log_syslog "run_sync rc=$rc. Abort."
+            trap - EXIT
             exit $rc
         }
     fi
@@ -223,12 +225,14 @@ run_timeshift() {
             --list)
                 send_desktop_notification "critical" "timeshift $ts_subcommand failed." "The timeshift $ts_subcommand command failed after $TS_MAX_ATTEMPTS tries. Maybe another instance of timeshift is active that holds the timeshift lock. Check syslog for errors. Abort."
                 log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Abort."
+                trap - EXIT
                 exit $ts_return_code
                 ;;
 
             --create)
                 send_desktop_notification "critical" "timeshift $ts_subcommand failed." "The timeshift $ts_subcommand command failed after $TS_MAX_ATTEMPTS tries. Maybe another instance of timeshift active that holds the timeshift lock. Check syslog for errors."
                 log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Abort."
+                trap - EXIT
                 exit $ts_return_code
                 ;;
             *)
@@ -475,10 +479,28 @@ run_user_hooks() {
     fi
 }
 
+# Global Exit Handler
+cleanup_and_notify() {
+    typeset exit_code=$?
+
+    # NOTE: for critical errors we already sent a desktop notification and
+    # switched off the trap to avoid sending one more notification here..
+    # This catches "command not found", "segfaults", "kill" signals, or
+    # other errors we did not catch.
+    if [[ $exit_code -ne 0 ]]; then
+        log_syslog "Script timeshift-autosnap-apt aborted prematurely with exit code $exit_code."
+        send_desktop_notification "critical" \
+                                  "Autosnap Script Error" \
+                                  "Script timeshift-autosnap-apt crashed (Code: $exit_code). The script may not have created a valid timeshift snapshot! The software update is aborted. Check your syslog for errors. When it is not clear why the script has crashed, run 'sudo timeshift-autosnap-apt --debug' for more information."
+    fi
+}
+
 # End of helper functions
 
 # ---------- Main Execution Logic ----------
 
+# 'EXIT' catches any termination of the script
+trap cleanup_and_notify EXIT
 
 # Constants & Initialization
 readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
@@ -624,6 +646,7 @@ if $UPDATE_GRUB && command -v grub-mkconfig >/dev/null; then
             [[ $status -eq 0 ]] || {
                 log_syslog "grub-mkconfig failed with status $status."
                 send_desktop_notification "critical" "Update grub failed." "Command grub_mkconfig failed. This could make your system unbootable. Check syslog for errors."
+                trap - EXIT
                 exit 1
             }
         }
