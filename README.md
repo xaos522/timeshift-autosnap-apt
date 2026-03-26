@@ -135,8 +135,8 @@ sudo timeshift-autosnap-apt --debug
 
 ## Check syslog if the script is not behaving as expected
 ```bash
-grep timeshift-autosnap-apt syslog
-```
+grep timeshift-autosnap-apt /var/log/syslog
+ ```
 ### Uninstallation
 ```bash
 cd /home/$USER/timeshift-autosnap-apt
