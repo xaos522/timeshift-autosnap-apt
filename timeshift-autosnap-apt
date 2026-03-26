@@ -300,16 +300,21 @@ auto_delete_snapshots() {
         log_syslog "snapshot count ($total_count) is at or below Safety Valve ($MIN_KEEP). Skip age-based deletion."
     fi
 }
+
+have_command() {
+   if command -v $1 >/dev/null; then return 0; else return 1; fi
+}
+
 send_desktop_notification() {
 
     function get_active_gui_user() {
         typeset -n nr_gui_user=$1
         typeset -n nr_gui_user_id=$2
-        typeset whereami="find_active_gui_user_using_loginctl"
+        typeset whereami="get_active_gui_user"
 
         # have loginctl?
-        if ! command -v loginctl >/dev/null; then
-            log_debug "${whereami}: command loginctlx not found"
+        if ! have_command loginctl; then
+            log_debug "${whereami}: command loginctl not found"
             return 1
         fi
 
@@ -341,10 +346,10 @@ send_desktop_notification() {
         # Find the GUI user for X11 setup (usually the one logged into display :0)
         typeset -n nr_gui_user=$1
         typeset -n nr_gui_user_id=$2
-        typeset whereami="find_active_gui_user_using_w"
+        typeset whereami="get_active_gui_user_fallback"
 
         # have w?
-        if ! command -v w >/dev/null; then
+        if ! have_command w >/dev/null; then
             log_debug "${whereami}: command w not found"
             return 1
         fi
@@ -384,8 +389,8 @@ send_desktop_notification() {
     typeset -i rc
 
     # have notify-send?
-    if ! command -v notify-send >/dev/null; then
-        log_debug "${whereami}: command notify-send not found"
+    if ! have_command notify-send; then
+        log_syslog "${whereami}: command notify-send not found"
         return 1
     fi
 
@@ -420,29 +425,48 @@ send_desktop_notification() {
 get_options() {
     typeset -g DRY_RUN DEBUG
     while [[ "$#" -gt 0 ]]; do
-        case $1 in
+        case "$1" in
             -n|--dry-run) DRY_RUN=true; shift ;;
             -d|--debug) DEBUG=true; shift ;;
-            -t|--test-send-notify)
+            -t|--test-notify-send)
+                shift
                 DEBUG=true
+
+                for cmd in loginctl notify-send w; do
+                    if ! have_command $cmd; then
+                        log_debug "command $cmd not found"
+                    fi
+                done
+
                 send_desktop_notification \
                     "normal" "Desktop notification test." \
                     "Testing if desktop notifications work on your system."
-                shift
-                exit 0 ;;
+                typeset -i rc=$?
+                if [[ $rc -eq 0 ]]; then
+                    log_debug "OK. Desktop notifications work."
+                else
+                    log_debug "Desktop notifications do not work."
+                fi
+                trap - EXIT
+                exit $?
+                ;;
+
             -h|--help)
                 echo "Usage: $0 [options]"
                 echo "Options:"
                 echo "  -d, --dry-run          Show what would happen without making changes"
                 echo "  -v, --verbose          Show loaded configuration and debug info"
-                echo "  -t, --test-send-notify Test desktop notification"
+                echo "  -t, --test-notify-send Test desktop notification"
                 echo "  -h, --help       Show this help message"
-                exit 0 ;;
+                exit 0
+                ;;
+
             *)
                 echo "Unknown option $1"
                 shift
                 exit 1
                 ;;
+
         esac
     done
 }
@@ -632,12 +656,12 @@ fi
 
 # auto delete snapshots.
 if $DELETE_OLD; then
-    log_debug "call auto_delete_snapshots..."
+    log_debug "auto_delete_snapshots..."
     auto_delete_snapshots
 fi
 
 # update grub.
-if $UPDATE_GRUB && command -v grub-mkconfig >/dev/null; then
+if $UPDATE_GRUB && have_command grub-mkconfig; then
     if [[ -d /etc/default/grub-btrfs ]] || [[ -f /usr/share/doc/grub-btrfs/README.md ]]; then
         log_syslog "Update grub..."
         $DRY_RUN || {
