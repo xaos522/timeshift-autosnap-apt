@@ -1,32 +1,88 @@
 # timeshift-autosnap-apt
-Timeshift auto-snapshot script which runs before any `apt update|install|remove` command using a `DPkg::Pre-Invoke` hook in APT. Works best in `BTRFS` mode, but `RSYNC` is also supported (might be slow though).
+A sophisticated, high-performance apt hook which runs before any `apt update|install|remove` command using a `DPkg::Pre-Invoke` hook in APT. Works best in `BTRFS` mode - `RSYNC` is also supported, but might be slow - for automated BTRFS/rsync snapshots using Timeshift.
 
-## Features
-*  This script is a fork of [timeshift-autosnap](https://gitlab.com/gobonja/timeshift-autosnap) from the [AUR](https://aur.archlinux.org/cgit/aur.git/tree/PKGBUILD?h=timeshift-autosnap), but adapted for usage with the APT package manager of Debian or Ubuntu based systems.
-*  Creates [Timeshift](https://github.com/teejee2008/timeshift) snapshots with a unique (customizable) comment.
+Designed for users who want a "bulletproof" backup strategy, this script doesn't just take a snapshot—it understands the context of your system changes and ensures your snapshots are "snapshot-worthy" before they are created.
+
+## Original Features
+*  This script is a fork of [timeshift-autosnap](https://github.com/wmutschl/timeshift-autosnap-apt).
+*  Creates [Timeshift](https://github.com/linuxmint/timeshift) snapshots with a unique (customizable) comment.
 *  Keeps only a certain number of snapshots created using this script.
 *  Deletes old snapshots which are created using this script.
 *  Makes a copy with RSYNC of `/boot` and `/boot/efi` to `/boot.backup` before the call to Timeshift for more flexible restore options.
 *  Can be manually executed by running `sudo timeshift-autosnap-apt`.
 *  Autosnaphots can be temporarily skipped by setting "SKIP_AUTOSNAP" environment variable (e.g. `sudo SKIP_AUTOSNAP= apt upgrade`)
 *  Supports [grub-btrfs](https://github.com/Antynea/grub-btrfs) which automatically creates boot menu entries of all your btrfs snapshots into grub.
-*  For a tutorial how to use this script in production to easily rollback your system, see [System Recovery with Timeshift](https://mutschler.eu/linux/install-guides/).
+
+## 🚀 New Key Features
+
+* Intelligent Context Logging: Automatically identifies if a snapshot was triggered by a manual apt install, a GUI update (Aptdaemon), or a system upgrade.
+* Safety Valve Retention: A hybrid deletion policy that keeps a week of snapshots but guarantees a minimum number (e.g., 3) are always kept, regardless of age.
+* Hook-in-Hook Architecture: Supports pre-snapshot and post-snapshot scripts for syncing DKMS modules, initramfs, or databases before the backup begins.
+* Crash Resilience: Uses a global exit trap and Wayland-compatible desktop notifications to alert you if a backup fails or a command crashes.
+* Performance First: Optimized for speed using native Bash regex and one-pass configuration parsing.
+
+## 📂 Directory Structure
+Path	                                        Purpose
+/usr/bin/timeshift-autosnap-apt	                The main execution script.
+/etc/timeshift-autosnap-apt.conf	            Configuration file for retention and thresholds.
+/etc/timeshift-autosnap-apt/pre-snapshot.d/	    Place scripts here to run before the snapshot.
+/etc/timeshift-autosnap-apt/post-snapshot.d/	Place scripts here to run after a successful snapshot.
+
+## 🛠️ Advanced Usage: Hooks
+
+* The power of this script lies in its extensibility. For example, to solve the common "NVIDIA black screen after restore" issue, you can create a script in the pre-snapshot.d folder:
+```bash
+
+# /etc/timeshift-autosnap-apt/pre-snapshot.d/01-sync-kernel
+#!/bin/bash
+# Ensure DKMS and Initramfs are synced so the snapshot is bootable
+dkms autoinstall
+update-initramfs -u
+```
+
+## ⚙️ New Configuration Options
+
+Edit /etc/timeshift-autosnap-apt.conf to customize behavior:
+
+* snapshotThreshold: (Seconds) Don't take a new snapshot if the last one is younger than this.
+Running the 'Software Update' app in ubuntu can trigger the script multiple times in quick succession. The snapshotThreshold prevents taking a new snapshot at every invocation.
+
+* retentionPeriod: (Seconds) How long to keep automated snapshots (Default: 7 days).
+
+* minKeepSnapshots: The "Safety Valve"—never delete more than this many snapshots.
+
+* updateGrub: Automatically runs grub-mkconfig if using grub-btrfs.
+
+## 🖥️ Commands
+
+* Test Notifications: sudo timeshift-autosnap-apt --test-notify-send
+
+* Dry Run: sudo timeshift-autosnap-apt --dry-run
+
+* Debug Mode: sudo timeshift-autosnap-apt --debug
+
+## Error handling
+
+* When errors are detected
+1. a desktop notification provides details about what went wrong
+2. error messages are logged to syslog
+3. the script will return a non-zero exit code and the software update will abort. We will not allow the software update to proceed when we might not have been able to create a valid snapshot.
 
 ## Installation
 #### Install dependencies
 ```bash
-sudo apt install git make
+sudo apt install git make libnotify-bin
 ```
 #### Install and configure Timeshift
 ```bash
 sudo apt install timeshift
 ```
-Open Timeshift and configure it either using btrfs or rsync. I recommend using btrfs as a filesystem for this, see my [btrfs installation guides](https://mutschler.eu/linux/install-guides/) for Pop!_OS, Ubuntu, and Manjaro.
+Open Timeshift and configure it either using btrfs or rsync. I recommend using btrfs as a filesystem for this.
 
 #### Main installation
 Clone this repository and install the script and configuration file with make:
 ```bash
-git clone https://github.com/wmutschl/timeshift-autosnap-apt.git /home/$USER/timeshift-autosnap-apt
+git clone https://github.com/xaos522/timeshift-autosnap-apt.git /home/$USER/timeshift-autosnap-apt
 cd /home/$USER/timeshift-autosnap-apt
 sudo make install
 ```
@@ -43,135 +99,37 @@ git clone https://github.com/Antynea/grub-btrfs.git /home/$USER/grub-btrfs
 cd /home/$USER/grub-btrfs
 sudo make install
 ```
-By default the snapshots are displayed as "Arch Linux Snapshots", you can adapt this in `/etc/default/grub-btrfs/config`.
-
-#### Configuration
+#### Original Configuration Options
 The configuration file is located in `/etc/timeshift-autosnap-apt.conf`. You can set the following options:
 *  `snapshotBoot`: If set to **true** /boot folder will be cloned with rsync into /boot.backup before the call to Timeshift. Note that this will not include the /boot/efi folder. Default: **true**
 *  `snapshotEFI`: If set to **true** /boot/efi folder will be cloned with rsync into /boot.backup/efi before the call to Timeshift. Default: **true**
 *  `skipAutosnap`: If set to **true** script won't be executed. Default: **false**.
 *  `deleteSnapshots`: If set to **false** old snapshots won't be deleted. Default: **true**
-*  `maxSnapshots`: Defines **maximum** number of old snapshots to keep. Default: **3**
 *  `updateGrub`: If set to **false** GRUB entries won't be generated. Only if grub-btrfs is installed. Default: **true**
-*  `snapshotDescription` Defines **string** used to distinguish snapshots created using timeshift-autosnap-apt. Default: **{timeshift-autosnap-apt} {created before call to APT}**
+*  `snapshotDescription` Defines **string** used to distinguish snapshots created using timeshift-autosnap-apt. Default: **empty string**. The snapshotDescription you specify here will be prefixed by a hardcoded {timeshift-autosnap-apt}. The rest of the description will be autmatically generated depending on how the script was invoked.
 
 ## Test functionality
 To test the functionality, simply run
 ```bash
-sudo timeshift-autosnap-apt
-``` 
-Or try (re)installing some package `maxSnapshots` number of times, e.g.
-```bash
-sudo apt install --reinstall rolldice
-sudo apt install --reinstall rolldice
-sudo apt install --reinstall rolldice
+sudo timeshift-autosnap-apt --debug --dry-run
 ```
-You should see output for BTRFS similar to
+This will not create a new snapshot, but produce a trace of what would happen if it were not a dry run.
+
+To create a new snapshot with feedback of what happens, run
 ```bash
-# Using system disk as snapshot device for creating snapshots in BTRFS mode
-#
-# /dev/dm-1 is mounted at: /run/timeshift/backup, options: rw,relatime,compress=zstd:3,ssd,space_cache,commit=120,subvolid=5,subvol=/
-#
-# Creating new backup...(BTRFS)
-# Saving to device: /dev/dm-1, mounted at path: /run/timeshift/backup
-# Created directory: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-46-30
-# Created subvolume snapshot: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-46-30/@
-# Created subvolume snapshot: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-46-30/@home
-# Created control file: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-46-30/info.json
-# BTRFS Snapshot saved successfully (0s)
-# Tagged snapshot '2020-04-29_09-46-30': ondemand
-# --------------------------------------------------------------------------
-```
-or for RSYNC similar to
-```bash
-# /dev/vdb1 is mounted at: /run/timeshift/backup, options: rw,relatime
-# ------------------------------------------------------------------------------
-# Creating new snapshot...(RSYNC)
-# Saving to device: /dev/vdb1, mounted at path: /run/timeshift/backup
-# Synching files with rsync...
-# Created control file: /run/timeshift/backup/timeshift/snapshots/2020-04-29_10-25-35/info.json
-# RSYNC Snapshot saved successfully (6s)
-# Tagged snapshot '2020-04-29_10-25-35': ondemand
-------------------------------------------------------------------------------
+sudo timeshift-autosnap-apt --debug 
 ```
 
-Open timeshift and see whether there are `maxSnapshots` packages:
-![Timeshift](timeshift-autosnap-apt.png)
-
-Close timeshift and reinstall the package another time and you should see that the first package is now deleted:
+## Check syslog if the script is not behaving as expected
 ```bash
-sudo apt install --reinstall rolldice
-#
-# Using system disk as snapshot device for creating snapshots in BTRFS mode
-# /dev/dm-1 is mounted at: /run/timeshift/backup, options: rw,relatime,compress=zstd:3,ssd,space_cache,commit=120,subvolid=5,subvol=/
-# Creating new backup...(BTRFS)
-# Saving to device: /dev/dm-1, mounted at path: /run/timeshift/backup
-# Created directory: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-53-25
-# Created subvolume snapshot: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-53-25/@
-# Created subvolume snapshot: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-53-25/@home
-# Created control file: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-53-25/info.json
-# BTRFS Snapshot saved successfully (0s)
-# Tagged snapshot '2020-04-29_09-53-25': ondemand
-# ------------------------------------------------------------------------------
-# 
-# /dev/dm-1 is mounted at: /run/timeshift/backup, options: rw,relatime,compress=zstd:3,ssd,space_cache,commit=120,subvolid=5,subvol=/
-# 
-# ------------------------------------------------------------------------------
-# Removing snapshot: 2020-04-29_09-46-30
-# Deleting subvolume: @home (Id:662)
-# Deleted subvolume: @home (Id:662)
-# 
-# Destroying qgroup: 0/662
-# Destroyed qgroup: 0/662
-# 
-# Deleting subvolume: @ (Id:661)
-# Deleted subvolume: @ (Id:661)
-# 
-# Destroying qgroup: 0/661
-# Destroyed qgroup: 0/661
-# 
-# Deleted directory: /run/timeshift/backup/timeshift-btrfs/snapshots/2020-04-29_09-46-30
-# Removed snapshot: 2020-04-29_09-46-30
-# ------------------------------------------------------------------------------
+grep timeshift-autosnap-apt syslog
 ```
-or for RSYNC:
-
-```bash
-# /dev/vdb1 is mounted at: /run/timeshift/backup, options: rw,relatime
-# 
-# ------------------------------------------------------------------------------
-# Creating new snapshot...(RSYNC)
-# Saving to device: /dev/vdb1, mounted at path: /run/timeshift/backup
-# Linking from snapshot: 2020-04-29_10-25-15
-# Synching files with rsync...
-# Created control file: /run/timeshift/backup/timeshift/snapshots/2020-04-29_10-25-35/info.json
-# RSYNC Snapshot saved successfully (6s)
-# Tagged snapshot '2020-04-29_10-25-35': ondemand
-# ------------------------------------------------------------------------------
-# 
-# /dev/vdb1 is mounted at: /run/timeshift/backup, options: rw,relatime
-# 
-# ------------------------------------------------------------------------------
-# Removing '2020-04-29_10-24-35'...
-# Removed '2020-04-29_10-24-35'                                                   
-# ------------------------------------------------------------------------------
-```
----
-
 ### Uninstallation
-```
+```bash
 cd /home/$USER/timeshift-autosnap-apt
 sudo make uninstall
 ```
 
----
-
 ## Ideas and contributions
-- [x] Ask to be included into official Timeshift package, [status pending](https://github.com/teejee2008/timeshift/issues/595).
-- [x] rsync /boot and /boot/efi to filesystem for more flexibility when restoring failed kernel updates (tested on Ubuntu 20.04 and Pop!_OS 20.04)
-- [x] Check and adapt [grub-btrfs](https://github.com/Antynea/grub-btrfs) for compatibility with Debian-based systems to automatically create menu entries into grub (tested on Ubuntu 20.04).
-- [ ] Make rsync of /boot and /boot/efi dependent on btrfs only, provide "auto" model, i.e. check whether efi or legacy boot and then rsync into filesystem
-- [ ] Add prompt or pause if user wants to trigger timeshift-autosnap-apt or add optional timeout between snapshots
-- [ ] Provide better description of snapshots based on call to apt
 
 **All new ideas and contributors are much appreciated and welcome, just open an issue for that!**
