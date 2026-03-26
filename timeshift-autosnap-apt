@@ -443,9 +443,42 @@ get_options() {
     done
 }
 
+# Execute user-defined scripts in pre/post directories
+run_user_hooks() {
+    typeset hook_dir="$1"
+    typeset description="$2" # pre-snapshot or post-snapshot
+
+    if [[ -d "$hook_dir" ]]; then
+        # Sort alphabetically for predictable execution
+        for hook in $(ls "$hook_dir" | sort); do
+            log_debug "considering $description hook $hook"
+            typeset hook_path="$hook_dir/$hook"
+            if [[ -x "$hook_path" ]]; then
+                if $DRY_RUN; then
+                    log_debug "[DRY RUN] Would run $description hook $hook"
+                else
+                    log_syslog "Executing $description hook: $hook"
+                    # Pass TRIGGER_CMD so hooks can be "context-aware"
+                    "$hook_path" "$DESCRIPTION"
+                    rc=$?
+                    if [[ $rc -ne 0 ]]; then
+                        send_desktop_notification "critical" "$description hook $hook failed." "The $description hook $hook failed (rc=$rc). Abort."
+                        log_syslog "$description hook $hook failed (rc=$rc). Abort."
+                        trap - EXIT
+                        exit $rc
+                    else
+                        log_syslog "$description hook $hook finished (rc=$rc)"
+                    fi
+                fi
+            fi
+        done
+    fi
+}
+
 # End of helper functions
 
 # ---------- Main Execution Logic ----------
+
 
 # Constants & Initialization
 readonly CONF_FILE=/etc/timeshift-autosnap-apt.conf
@@ -564,11 +597,15 @@ unset TRIGGER_CMD FINAL_NOTE
 
 # maybe create new snapshot
 if $CREATE_NEW_SNAPSHOT; then
+    # --- PRE-SNAPSHOT HOOKS ---
+    run_user_hooks "/etc/timeshift-autosnap-apt/pre-snapshot.d" "pre-snapshot"
     if $DRY_RUN; then
         log_debug "[DRY RUN] Would create snapshot: $DESCRIPTION"
     else
-        run_timeshift --create --comments "$DESCRIPTION" || exit 1
+        run_timeshift --create --comments "$DESCRIPTION" || exit $?
     fi
+    # --- POST-SNAPSHOT HOOKS ---
+    run_user_hooks "/etc/timeshift-autosnap-apt/post-snapshot.d" "post-snapshot"
 fi
 
 # auto delete snapshots.
