@@ -1,1 +1,8 @@
-DPkg::Pre-Invoke {"/usr/bin/timeshift-autosnap-apt"; };
+// /etc/apt/apt.conf.d/80timeshift-autosnap-apt
+
+// This script creates a Timeshift snapshot before apt modifies the system.
+// It is triggered by any install, remove, or upgrade command.
+
+DPkg::Pre-Invoke {
+    "if [ -x /usr/bin/timeshift-autosnap-apt ]; then /usr/bin/timeshift-autosnap-apt; fi";
+};
