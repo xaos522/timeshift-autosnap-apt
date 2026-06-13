@@ -1,0 +1,47 @@
+2026-03-21T16:59:36.639794+01:00 Ubuntu root: timeshift-autosnap-apt: #0 17424 /bin/bash /usr/bin/timeshift-autosnap-apt
+2026-03-21T16:59:36.674467+01:00 Ubuntu root: timeshift-autosnap-apt: #1 17423 sh -c -- /usr/bin/timeshift-autosnap-apt
+2026-03-21T16:59:36.709594+01:00 Ubuntu root: timeshift-autosnap-apt: #2 17422 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T16:59:36.745464+01:00 Ubuntu root: timeshift-autosnap-apt: #3 17421 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T16:59:36.788151+01:00 Ubuntu root: timeshift-autosnap-apt: #4 17212 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T16:59:36.826609+01:00 Ubuntu root: timeshift-autosnap-apt: #5 1 /sbin/init splash toram
+2026-03-21T16:59:36.830561+01:00 Ubuntu root: timeshift-autosnap-apt: TRIGGER_CMD =  Aptdaemon (GUI Update)
+2026-03-21T16:59:36.866807+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list
+2026-03-21T16:59:37.364187+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list returned 0
+2026-03-21T16:59:37.394073+01:00 Ubuntu root: timeshift-autosnap-apt: Age of last snapshot: 5380 seconds
+2026-03-21T16:59:37.398331+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --create --comments {timeshift-autosnap-apt} Aptdaemon (GUI Update)
+2026-03-21T16:59:38.917181+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --create returned 0
+2026-03-21T16:59:38.921181+01:00 Ubuntu root: timeshift-autosnap-apt: Snapshot count (4) within limit (10). No deletions needed.
+2026-03-21T16:59:38.924898+01:00 Ubuntu root: timeshift-autosnap-apt: Snapshot cycle completed successfully.
+2026-03-21T16:59:38.965490+01:00 Ubuntu root: timeshift-autosnap-apt: #0 17597 /bin/bash /usr/bin/timeshift-autosnap-apt
+2026-03-21T16:59:38.998269+01:00 Ubuntu root: timeshift-autosnap-apt: #1 17596 sh -c -- /usr/bin/timeshift-autosnap-apt
+2026-03-21T16:59:39.033294+01:00 Ubuntu root: timeshift-autosnap-apt: #2 17422 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T16:59:39.066313+01:00 Ubuntu root: timeshift-autosnap-apt: #3 17421 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T16:59:39.102108+01:00 Ubuntu root: timeshift-autosnap-apt: #4 17212 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T16:59:39.137142+01:00 Ubuntu root: timeshift-autosnap-apt: #5 1 /sbin/init splash toram
+2026-03-21T16:59:39.140930+01:00 Ubuntu root: timeshift-autosnap-apt: TRIGGER_CMD =  Aptdaemon (GUI Update)
+2026-03-21T16:59:39.176074+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list
+2026-03-21T16:59:39.676304+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list returned 0
+2026-03-21T16:59:39.706720+01:00 Ubuntu root: timeshift-autosnap-apt: Age of last snapshot: 2 seconds
+2026-03-21T16:59:39.710758+01:00 Ubuntu root: timeshift-autosnap-apt: SKIPPING: last snapshot is only 2 seconds old (Threshold: 300).
+2026-03-21T17:00:23.050705+01:00 Ubuntu root: timeshift-autosnap-apt: #0 18211 /bin/bash /usr/bin/timeshift-autosnap-apt
+2026-03-21T17:00:23.084935+01:00 Ubuntu root: timeshift-autosnap-apt: #1 18210 sh -c -- /usr/bin/timeshift-autosnap-apt
+2026-03-21T17:00:23.119733+01:00 Ubuntu root: timeshift-autosnap-apt: #2 18209 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T17:00:23.155452+01:00 Ubuntu root: timeshift-autosnap-apt: #3 18208 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T17:00:23.187758+01:00 Ubuntu root: timeshift-autosnap-apt: #4 17212 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T17:00:23.222743+01:00 Ubuntu root: timeshift-autosnap-apt: #5 1 /sbin/init splash toram
+2026-03-21T17:00:23.226924+01:00 Ubuntu root: timeshift-autosnap-apt: TRIGGER_CMD =  Aptdaemon (GUI Update)
+2026-03-21T17:00:23.260666+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list
+2026-03-21T17:00:23.782634+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list returned 0
+2026-03-21T17:00:23.810843+01:00 Ubuntu root: timeshift-autosnap-apt: Age of last snapshot: 46 seconds
+2026-03-21T17:00:23.814700+01:00 Ubuntu root: timeshift-autosnap-apt: SKIPPING: last snapshot is only 46 seconds old (Threshold: 300).
+2026-03-21T17:00:23.862210+01:00 Ubuntu root: timeshift-autosnap-apt: #0 18287 /bin/bash /usr/bin/timeshift-autosnap-apt
+2026-03-21T17:00:23.897205+01:00 Ubuntu root: timeshift-autosnap-apt: #1 18286 sh -c -- /usr/bin/timeshift-autosnap-apt
+2026-03-21T17:00:23.951078+01:00 Ubuntu root: timeshift-autosnap-apt: #2 18209 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T17:00:23.988663+01:00 Ubuntu root: timeshift-autosnap-apt: #3 18208 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T17:00:24.023905+01:00 Ubuntu root: timeshift-autosnap-apt: #4 17212 /usr/bin/python3 /usr/sbin/aptd
+2026-03-21T17:00:24.058098+01:00 Ubuntu root: timeshift-autosnap-apt: #5 1 /sbin/init splash toram
+2026-03-21T17:00:24.061782+01:00 Ubuntu root: timeshift-autosnap-apt: TRIGGER_CMD =  Aptdaemon (GUI Update)
+2026-03-21T17:00:24.096448+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list
+2026-03-21T17:00:24.598541+01:00 Ubuntu root: timeshift-autosnap-apt: timeshift --list returned 0
+2026-03-21T17:00:24.627208+01:00 Ubuntu root: timeshift-autosnap-apt: Age of last snapshot: 47 seconds
+2026-03-21T17:00:24.631185+01:00 Ubuntu root: timeshift-autosnap-apt: SKIPPING: last snapshot is only 47 seconds old (Threshold: 300).

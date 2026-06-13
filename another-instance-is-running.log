@@ -1,0 +1,29 @@
+me@ubuntu:~/Projects/timeshift-autosnap-apt$ sudo ./timeshift-autosnap-apt --dry-run --verbose
+--- DEBUG: Loaded Configuration ---
+  snapshotEFI = false
+  skipAutosnap = false
+  maxSnapshots = 0
+  deleteSnapshots = true
+  snapshotBoot = false
+  updateGrub = false
+  snapshotDescription = {timeshift-autosnap-apt} {created before call to dpkg}
+-----------------------------------
+--- DRY RUN MODE ACTIVE ---
+==> Creating Timeshift snapshot...
+[DRY RUN] Would create snapshot: {timeshift-autosnap-apt} {created before call to dpkg}
++ [[ true == \t\r\u\e ]]
++ AUTO_SNAPS=()
++ typeset -a ALL_SNAPS AUTO_SNAPS
++ mapfile -t ALL_SNAPS
+++ timeshift --list
++ for SNAP in "${ALL_SNAPS[@]}"
++ [[ Another instance of this application is running (PID=9919) =~ {timeshift-autosnap-apt} {created before call to dpkg} ]]
++ unset SNAP ALL_SNAPS
++ echo 'Number of autosnaps = 0'
+Number of autosnaps = 0
++ NUM_TO_DELETE=0
++ ((  NUM_TO_DELETE > 0  ))
++ [[ false == \t\r\u\e ]]
++ exit 0
+me@ubuntu:~/Projects/timeshift-autosnap-apt$ 
+
