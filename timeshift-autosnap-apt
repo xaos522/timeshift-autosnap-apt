@@ -9,7 +9,7 @@ log_debug () {
 }
 
 log_syslog() {
-    logger -- "timeshift-autosnap-apt: $@"
+    logger -- "timeshift-autosnap-apt: $*"
     log_debug "$@"
 }
 
@@ -18,7 +18,7 @@ log_syslog() {
 # Argument Cleaner
 # strip any word starting with a dash
 clean_apt_args() {
-    typeset -a raw_args=($1)
+    typeset -a raw_args=("$1")
     typeset -a clean_args=()
     for arg in "${raw_args[@]}"; do
         # if argument doesn't start with '-', keep it
@@ -39,7 +39,8 @@ walk_up_the_process_tree() {
     typeset PS_OUT NEXT_LEVEL_PPID ARGS BINARY ACTION PARAMS CLEAN_PARAMS
 
     while true ; do
-        typeset PS_OUT="$(ps -o ppid= -o args= -p $PARENT_PID)"
+        typeset PS_OUT
+        PS_OUT="$(ps -o ppid= -o args= -p $PARENT_PID)"
         # !!! WATCH OUT "Off-by_One logic" !!!
         # PS_OUT now has the PID of the next higher level
         # but the ARGUMENTS from the current level.
@@ -57,7 +58,8 @@ walk_up_the_process_tree() {
                 typeset PARAMS="${BASH_REMATCH[4]}"
 
                 # Clean the parameters of flags like -y or --quiet
-                typeset CLEAN_PARAMS=$(clean_apt_args "$PARAMS")
+                typeset CLEAN_PARAMS
+                CLEAN_PARAMS=$(clean_apt_args "$PARAMS")
                 TRIGGER_CMD="$BINARY $ACTION $CLEAN_PARAMS"
 
             elif [[ "$ARGS" =~ /usr/sbin/aptd ]]; then
@@ -151,7 +153,7 @@ run_sync() {
         rsync -au --delete "$SRC" "$DEST"
         rc=$?
         [[ $rc -eq 0 ]] || {
-            send_desktop_notification "critical" "run_sync failed." "rsync -au --delete $SRC $DEST returned status $?. Abort."
+            send_desktop_notification "critical" "run_sync failed." "rsync -au --delete $SRC $DEST returned status $rc. Abort."
             log_syslog "run_sync rc=$rc. Abort."
             trap - EXIT
             exit $rc
@@ -212,7 +214,7 @@ run_timeshift() {
             # timeshift command failed
             log_syslog "timeshift $ts_subcommand rc=$ts_return_code (attempt $attempt of $TS_MAX_ATTEMPTS)"
             if (( attempt < TS_MAX_ATTEMPTS )); then
-                sleep $TS_WAIT_SECONDS
+                sleep "$TS_WAIT_SECONDS"
             fi
 
             (( attempt++ ))
@@ -226,14 +228,14 @@ run_timeshift() {
                 send_desktop_notification "critical" "timeshift $ts_subcommand failed." "The timeshift $ts_subcommand command failed after $TS_MAX_ATTEMPTS tries. Maybe another instance of timeshift is active that holds the timeshift lock. Check syslog for errors. Abort."
                 log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Abort."
                 trap - EXIT
-                exit $ts_return_code
+                exit "$ts_return_code"
                 ;;
 
             --create)
                 send_desktop_notification "critical" "timeshift $ts_subcommand failed." "The timeshift $ts_subcommand command failed after $TS_MAX_ATTEMPTS tries. Maybe another instance of timeshift active that holds the timeshift lock. Check syslog for errors."
                 log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Abort."
                 trap - EXIT
-                exit $ts_return_code
+                exit "$ts_return_code"
                 ;;
             *)
                 log_syslog "timeshift $ts_subcommand rc=${ts_return_code}. Ignore."
@@ -243,7 +245,7 @@ run_timeshift() {
         log_syslog "timeshift $ts_subcommand rc=${ts_return_code}."
     fi
 
-    return $ts_return_code
+    return "$ts_return_code"
 
 } # end of run_timeshift
 
@@ -255,8 +257,10 @@ get_snapshot_age() {
     # Convert YYYY-MM-DD_HH-MM-SS to YYYY-MM-DD HH:MM:SS
     TIMESTAMP="${SNAPSHOT/_/ }"
     TIMESTAMP="${TIMESTAMP:0:10} ${TIMESTAMP:11:2}:${TIMESTAMP:14:2}:${TIMESTAMP:17:2}"
-    typeset -i SNAPSHOT_EPOCH=$(date -u -d "$TIMESTAMP" +%s)
-    typeset -i NOW_EPOCH=$(date -u +%s)
+    typeset -i SNAPSHOT_EPOCH
+    SNAPSHOT_EPOCH=$(date -u -d "$TIMESTAMP" +%s)
+    typeset -i NOW_EPOCH
+    NOW_EPOCH=$(date -u +%s)
     echo $(( NOW_EPOCH - SNAPSHOT_EPOCH ))
 }
 
@@ -302,7 +306,7 @@ auto_delete_snapshots() {
 }
 
 have_command() {
-   if command -v $1 >/dev/null; then return 0; else return 1; fi
+   if command -v "$1" >/dev/null; then return 0; else return 1; fi
 }
 
 send_desktop_notification() {
@@ -333,7 +337,7 @@ send_desktop_notification() {
             if [[ "$item" =~ $pattern ]]; then
                 active="${BASH_REMATCH[3]}"
                 nr_gui_user_id="${BASH_REMATCH[1]}"
-                ( [[ "$active" != active ]] || [[ "$user_id" == 0 ]] ) && continue
+                if [[ "$active" != active ]] || [[ "$user_id" == 0 ]]; then continue; fi
                 nr_gui_user="${BASH_REMATCH[2]}"
                 break
             else
